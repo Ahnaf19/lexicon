@@ -1,4 +1,5 @@
 docs/planning
+samples/cuad_pdfs
 .DS_Store
 .env
 __pycache__/
