@@ -1,2 +1,11 @@
 docs/planning
 .DS_Store
+.env
+__pycache__/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.pyc
+*.pyo
+alembic/versions/__pycache__/
