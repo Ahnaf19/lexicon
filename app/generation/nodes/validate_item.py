@@ -12,7 +12,7 @@ from app.generation.templates.types import TemplateItem
 from app.models.pydantic_models import ChecklistItem, EvidenceCitation
 from app.retrieval.hybrid_search import SearchHit
 
-_PAGE_REF_RE = re.compile(r"\[doc=([^\s\]]+)\s+p\.(\d+)\]")
+_PAGE_REF_RE = re.compile(r"\[doc=([^\s\]]+)\s+(?:p\.|page=)(\d+)\]")
 _Ei_RE = re.compile(r"^E(\d+)$", re.IGNORECASE)
 
 _VALID_STATUSES = {"present", "missing", "unclear"}

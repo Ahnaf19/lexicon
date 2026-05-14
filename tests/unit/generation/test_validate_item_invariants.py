@@ -175,3 +175,26 @@ def test_missing_status_with_no_citations_passes():
     assert result.evidence == []
     # Rationale must be preserved, not replaced by the V1 message.
     assert "No supporting evidence" not in result.rationale
+
+
+# ---------------------------------------------------------------------------
+# V5: both [doc=X p.N] and [doc=X page=N] formats handled
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("ref_format", ["p.{p}", "page={p}"])
+def test_V5_verified_page_ref_both_formats(ref_format: str) -> None:
+    doc_id = uuid.uuid4()
+    h = _hit(doc_id=doc_id, page=5)
+    rationale = f"[doc={doc_id} {ref_format.format(p=5)}] parties clearly identified."
+    result = _build(status="present", cited_evidence=["E1"], rationale=rationale, hits=[h])
+    assert "could not be verified" not in result.rationale
+
+
+@pytest.mark.parametrize("ref_format", ["p.{p}", "page={p}"])
+def test_V5_unverified_page_ref_both_formats(ref_format: str) -> None:
+    doc_id = uuid.uuid4()
+    h = _hit(doc_id=doc_id, page=3)
+    rationale = f"[doc={doc_id} {ref_format.format(p=99)}] page not in retained evidence."
+    result = _build(status="present", cited_evidence=["E1"], rationale=rationale, hits=[h])
+    assert "could not be verified" in result.rationale
