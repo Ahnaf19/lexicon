@@ -1,0 +1,155 @@
+"""Shared pytest fixtures for unit tests — no real DB, no real models."""
+
+from __future__ import annotations
+
+import uuid
+from collections import defaultdict
+from contextlib import asynccontextmanager
+from typing import Any, AsyncGenerator
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+from pydantic import BaseModel
+
+from app.ingestion.models import Block
+from app.models.pydantic_models import BBox, DocumentMeta
+
+
+# ---------------------------------------------------------------------------
+# Fake DB session
+# ---------------------------------------------------------------------------
+
+
+class FakeSession:
+    """Records add/commit calls; exposes added rows by model class name."""
+
+    def __init__(self) -> None:
+        self.added: dict[str, list[Any]] = defaultdict(list)
+        self._committed = False
+
+    def add(self, obj: Any) -> None:
+        self.added[type(obj).__name__].append(obj)
+
+    async def commit(self) -> None:
+        self._committed = True
+
+    async def get(self, model: Any, pk: Any) -> Any | None:
+        rows = self.added.get(model.__name__, [])
+        for row in rows:
+            if getattr(row, "id", None) == pk:
+                return row
+        return None
+
+    async def execute(self, stmt: Any) -> Any:
+        result = MagicMock()
+        result.scalars.return_value.first.return_value = None
+        result.scalar_one.return_value = 0
+        return result
+
+    async def __aenter__(self) -> "FakeSession":
+        return self
+
+    async def __aexit__(self, *args: Any) -> None:
+        pass
+
+
+@asynccontextmanager
+async def fake_session_factory_ctx() -> AsyncGenerator[FakeSession, None]:
+    yield FakeSession()
+
+
+class FakeSessionFactory:
+    """Callable that returns a new FakeSession each time (usable as async_sessionmaker)."""
+
+    def __init__(self) -> None:
+        self.sessions: list[FakeSession] = []
+
+    def __call__(self) -> FakeSession:
+        s = FakeSession()
+        self.sessions.append(s)
+        return s
+
+    @property
+    def last(self) -> FakeSession:
+        return self.sessions[-1]
+
+
+@pytest.fixture
+def fake_sf() -> FakeSessionFactory:
+    return FakeSessionFactory()
+
+
+# ---------------------------------------------------------------------------
+# Block factory
+# ---------------------------------------------------------------------------
+
+
+def make_block(
+    text: str = "Sample legal text.",
+    confidence: float = 0.9,
+    is_handwriting: bool = False,
+    page: int = 1,
+) -> Block:
+    return Block(
+        text=text,
+        page=page,
+        bbox=BBox(x0=0.0, y0=0.0, x1=100.0, y1=20.0),
+        char_offset_start=0,
+        char_offset_end=len(text),
+        confidence=confidence,
+        ocr_engine="marker",
+        is_handwriting=is_handwriting,
+    )
+
+
+# ---------------------------------------------------------------------------
+# DocumentMeta factory
+# ---------------------------------------------------------------------------
+
+
+def make_meta(doc_id: uuid.UUID | None = None, doc_type: str = "license") -> DocumentMeta:
+    return DocumentMeta(
+        doc_id=doc_id or uuid.uuid4(),
+        doc_type=doc_type,  # type: ignore[arg-type]
+        parties=[],
+        effective_date=None,
+        monetary_terms=[],
+        defined_terms=[],
+        exhibits_referenced=[],
+        signature_blocks=[],
+        governing_law=None,
+        confidence=0.85,
+    )
+
+
+# ---------------------------------------------------------------------------
+# PIL stub image
+# ---------------------------------------------------------------------------
+
+
+def make_pil_stub() -> Any:
+    """Minimal PIL Image stub (does not require pillow display)."""
+    img = MagicMock()
+    img.convert.return_value = img
+    return img
+
+
+# ---------------------------------------------------------------------------
+# MarkerOutput stub
+# ---------------------------------------------------------------------------
+
+from app.ingestion.marker_runner import MarkerOutput  # noqa: E402
+
+
+def make_marker_output(blocks: list[Block]) -> MarkerOutput:
+    marker_blocks = []
+    for _ in blocks:
+        mb = MagicMock()
+        mb.get_image.return_value = make_pil_stub()
+        marker_blocks.append(mb)
+    document_stub = MagicMock()
+    return MarkerOutput(
+        blocks=blocks,
+        _marker_blocks=marker_blocks,
+        _document=document_stub,
+    )
