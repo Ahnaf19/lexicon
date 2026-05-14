@@ -14,10 +14,15 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.api.checklist_service import (
+    add_item as _svc_add,
+    apply_item_patch as _svc_patch,
+    delete_item as _svc_delete,
+)
 from app.core.db import SessionLocal, get_session
 from app.generation.graph import get_compiled_graph
 from app.generation.state import ChecklistState
-from app.learning.edit_capture import get_operator_id, write_edit_event, write_edit_events_bulk
+from app.learning.edit_capture import get_operator_id
 from app.learning.pattern_extractor import extract_patterns
 from app.models.pydantic_models import (
     Checklist,
@@ -26,15 +31,8 @@ from app.models.pydantic_models import (
     EvidenceMutation,
     LearnedPattern,
     PartialChecklistItem,
-    CategoryReordered,
     EvidenceAdded,
     EvidenceCorrected,
-    ItemAdded,
-    ItemRemoved,
-    ItemRenamed,
-    ItemTextRewritten,
-    RequiredToggled,
-    StatusChanged,
 )
 from app.models.sqlalchemy_models import Checklist as ChecklistORM
 from app.models.sqlalchemy_models import ChecklistItem as ChecklistItemORM
@@ -363,81 +361,11 @@ async def patch_checklist_item(
 ) -> ChecklistItem:
     """Apply partial updates to one item; emit one edit_event per changed field."""
     await _require_checklist(session, checklist_id)
-    item_orm = await _require_item(session, checklist_id, item_id)
     actor = get_operator_id(request)
-    now = datetime.now(timezone.utc)
-
-    events = []
-
-    if body.title is not None and body.title != item_orm.title:
-        events.append(
-            ItemRenamed(item_id=item_id, old_title=item_orm.title, new_title=body.title)
-        )
-        item_orm.title = body.title
-
-    if body.status is not None and body.status != item_orm.status:
-        events.append(
-            StatusChanged(
-                item_id=item_id,
-                old_status=item_orm.status,  # type: ignore[arg-type]
-                new_status=body.status,
-            )
-        )
-        item_orm.status = body.status
-
-    if body.category is not None and body.category != item_orm.category:
-        events.append(
-            CategoryReordered(
-                item_id=item_id,
-                old_category=item_orm.category,
-                new_category=body.category,
-            )
-        )
-        item_orm.category = body.category
-
-    if body.description is not None and body.description != item_orm.description:
-        events.append(
-            ItemTextRewritten(
-                item_id=item_id,
-                field="description",
-                old_text=item_orm.description,
-                new_text=body.description,
-            )
-        )
-        item_orm.description = body.description
-
-    if body.rationale is not None and body.rationale != (item_orm.rationale or ""):
-        events.append(
-            ItemTextRewritten(
-                item_id=item_id,
-                field="rationale",
-                old_text=item_orm.rationale or "",
-                new_text=body.rationale,
-            )
-        )
-        item_orm.rationale = body.rationale
-
-    if body.required is not None and body.required != item_orm.required:
-        events.append(
-            RequiredToggled(item_id=item_id, old=item_orm.required, new=body.required)
-        )
-        item_orm.required = body.required
-
-    if body.confidence is not None:
-        item_orm.confidence = body.confidence
-
-    # Bulk-insert all events in one statement (L6).
-    if events:
-        from app.learning.edit_capture import write_edit_events_bulk as _bulk
-
-        await _bulk(
-            session=session,
-            checklist_id=checklist_id,
-            item_id=item_id,
-            events=events,
-            actor=actor,
-        )
-
+    try:
+        await _svc_patch(session, checklist_id, item_id, body, actor)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     await session.commit()
     item_orm = await _require_item(session, checklist_id, item_id)
     return _item_orm_to_pydantic(item_orm)
@@ -458,56 +386,7 @@ async def add_checklist_item(
     """Insert a new item into the checklist and record an item_added event."""
     await _require_checklist(session, checklist_id)
     actor = get_operator_id(request)
-    now = datetime.now(timezone.utc)
-
-    # Server assigns the id.
-    new_id = uuid.uuid4()
-    item_orm = ChecklistItemORM(
-        id=new_id,
-        checklist_id=checklist_id,
-        source_template_item_id=body.source_template_item_id,
-        category=body.category,
-        title=body.title,
-        description=body.description,
-        status=body.status,
-        required=body.required,
-        confidence=body.confidence,
-        rationale=body.rationale,
-        learned_from_pattern_ids=list(body.learned_from_pattern_ids),
-    )
-    session.add(item_orm)
-    await session.flush()
-
-    for ec in body.evidence:
-        session.add(
-            EvidenceCitationORM(
-                id=ec.citation_id,
-                checklist_item_id=new_id,
-                chunk_id=ec.chunk_id,
-                doc_id=ec.doc_id,
-                page_number=ec.page_number,
-                char_offset_start=ec.char_offset_start,
-                char_offset_end=ec.char_offset_end,
-                snippet=ec.snippet,
-                retrieval_score=ec.retrieval_score,
-                rerank_score=ec.rerank_score,
-            )
-        )
-
-    final_item = body.model_copy(update={"id": new_id})
-    event = ItemAdded(item=final_item)
-    session.add(
-        EditEventORM(
-            id=uuid.uuid4(),
-            checklist_id=checklist_id,
-            checklist_item_id=new_id,
-            event_type=event.event_type,
-            payload=event.model_dump(mode="json"),
-            actor=actor,
-            created_at=now,
-        )
-    )
-
+    new_id = await _svc_add(session, checklist_id, body, actor)
     await session.commit()
     item_orm = await _require_item(session, checklist_id, new_id)
     return _item_orm_to_pydantic(item_orm)
@@ -527,35 +406,11 @@ async def delete_checklist_item(
 ) -> Response:
     """Hard-delete an item and record an item_removed event (capture before delete)."""
     await _require_checklist(session, checklist_id)
-    item_orm = await _require_item(session, checklist_id, item_id)
     actor = get_operator_id(request)
-    now = datetime.now(timezone.utc)
-
-    # Capture edit event — set checklist_item_id=None (FK has no ON DELETE SET NULL in migration).
-    event = ItemRemoved(item_id=item_id)
-    session.add(
-        EditEventORM(
-            id=uuid.uuid4(),
-            checklist_id=checklist_id,
-            checklist_item_id=None,
-            event_type=event.event_type,
-            payload=event.model_dump(mode="json"),
-            actor=actor,
-            created_at=now,
-        )
-    )
-    # Null out any existing FK references before hard-delete.
-    await session.execute(
-        update(EditEventORM)
-        .where(EditEventORM.checklist_item_id == item_id)
-        .values(checklist_item_id=None)
-        .execution_options(synchronize_session=False)
-    )
-    await session.execute(
-        delete(ChecklistItemORM)
-        .where(ChecklistItemORM.id == item_id)
-        .execution_options(synchronize_session=False)
-    )
+    try:
+        await _svc_delete(session, checklist_id, item_id, actor)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     await session.commit()
     return Response(status_code=204)
 
