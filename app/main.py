@@ -7,6 +7,7 @@ from typing import AsyncGenerator
 
 from fastapi import FastAPI
 
+from app.api.checklists import router as checklists_router
 from app.api.documents import router as documents_router
 from app.core.logging import configure_logging
 
@@ -19,3 +20,4 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 app = FastAPI(title="Lexicon", version="0.1.0", lifespan=lifespan)
 app.include_router(documents_router, prefix="/documents", tags=["documents"])
+app.include_router(checklists_router, prefix="/checklists", tags=["checklists"])

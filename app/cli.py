@@ -1,9 +1,10 @@
-"""CLI entry point for Lexicon ingestion, indexing, and search.
+"""CLI entry point for Lexicon ingestion, indexing, search, and checklist generation.
 
 Usage:
     uv run python -m app.cli ingest <path> [--case-id <uuid>]
     uv run python -m app.cli reindex [doc_id | --case-id X | --all]
     uv run python -m app.cli search "<query>" --case-id X [--k 5]
+    uv run python -m app.cli checklist generate --case-id X [--template commercial_contract|nda]
 """
 
 from __future__ import annotations
@@ -218,6 +219,89 @@ def search(
             )
 
         console.print(table)
+
+    asyncio.run(_run())
+
+
+checklist_app = typer.Typer(help="Checklist generation commands")
+app.add_typer(checklist_app, name="checklist")
+
+
+@checklist_app.command("generate")
+def checklist_generate(
+    case_id: uuid.UUID = typer.Option(..., "--case-id", help="Case UUID"),
+    template: str = typer.Option("commercial_contract", "--template", help="Template slug: commercial_contract or nda"),
+) -> None:
+    """Generate a checklist for a case; streams per-item progress."""
+    configure_logging()
+    import json as _json
+
+    from rich.progress import Progress, SpinnerColumn, TextColumn
+
+    from app.generation.graph import get_compiled_graph
+    from app.generation.state import ChecklistState
+    from app.generation.templates import TEMPLATES
+    from app.models.pydantic_models import Checklist
+
+    if template not in TEMPLATES:
+        rprint(f"[red]Unknown template '{template}'. Available: {list(TEMPLATES)}[/red]")
+        raise typer.Exit(1)
+
+    tmpl = TEMPLATES[template]
+    slugs = [item.slug for item in tmpl.items]
+
+    async def _run() -> None:
+        initial_state: ChecklistState = {
+            "case_id": case_id,
+            "template_slug": template,
+            "document_ids": [],
+            "errors": [],
+        }
+        graph = get_compiled_graph()
+        completed: set[str] = set()
+        final_state: dict = {}
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console,
+            transient=True,
+        ) as progress:
+            tasks = {slug: progress.add_task(f"[cyan]{slug}[/cyan]", total=1) for slug in slugs}
+
+            # astream yields incremental state updates; the last chunk is the full final state.
+            async for chunk in graph.astream(initial_state, stream_mode="updates"):
+                final_state.update(chunk)
+                # Each chunk is {node_name: node_output_dict}
+                for node_name, node_out in chunk.items():
+                    if node_name == "validate_item" and isinstance(node_out, dict):
+                        in_progress = node_out.get("items_in_progress", {})
+                        for s in slugs:
+                            if s not in completed:
+                                entry = in_progress.get(s)
+                                if entry is not None and not isinstance(entry, dict):
+                                    completed.add(s)
+                                    if s in tasks:
+                                        progress.advance(tasks[s])
+                                        progress.update(
+                                            tasks[s],
+                                            description=f"[green]{s} ✓[/green]",
+                                        )
+
+        # astream "updates" mode: final_state = {node_name: output_dict, ...}
+        assemble_out = final_state.get("assemble") or {}
+        checklist_out = assemble_out.get("checklist") if isinstance(assemble_out, dict) else None
+
+        if checklist_out is None:
+            rprint("[red]ERROR: No checklist produced. Check logs for errors.[/red]")
+            raise typer.Exit(1)
+
+        if isinstance(checklist_out, Checklist):
+            output = checklist_out.model_dump(mode="json")
+        else:
+            output = checklist_out
+
+        console.print_json(_json.dumps(output, default=str))
 
     asyncio.run(_run())
 
