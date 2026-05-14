@@ -1,4 +1,4 @@
-"""Happy path: 3 high-confidence blocks → 1 document, 3 chunks, status=indexed."""
+"""Happy path: 3 high-confidence blocks → 1 document, 3 chunks, status=ocr_done."""
 
 from __future__ import annotations
 
@@ -66,5 +66,5 @@ async def test_happy_path(fake_sf: FakeSessionFactory) -> None:
     assert len(all_added.get("Chunk", [])) == 3, "Expected 3 Chunk rows"
 
     doc_row = all_added["Document"][0]
-    assert doc_row.status == "indexed"
+    assert doc_row.status == "ocr_done"
     assert doc_row.id == doc_id
