@@ -1,214 +1,168 @@
 # Lexicon
 
-Grounded document-checklist generator for messy legal documents.
-Upload a set of case documents → get a checklist of required items with evidence citations → edit it → the system learns from your edits.
+Lexicon ingests messy legal documents — scanned contracts, degraded PDFs, handwritten exhibits — and produces structured Document Checklists where every claim cites a specific span in the source material.
+
+Unlike naive RAG pipelines that generate plausible-sounding answers, Lexicon enforces grounding: a V1–V5 validation gate rejects hallucinated page references and coerces ambiguous evidence to `unclear` rather than guessing. Parent-section expansion ensures that citations still point at precise text windows while generation sees the full surrounding context.
+
+The improvement loop is operational — operator edits become typed database rows, distilled into promoted `LearnedPattern` rules, and applied automatically on the next run.
 
 ---
 
-## System Architecture
+## Quickstart
+
+```bash
+docker compose up -d postgres ollama
+uv run alembic upgrade head
+uv run python -m app.cli ingest samples/clean samples/degraded samples/handwritten
+```
+
+Generate a checklist against the demo case:
+
+```bash
+uv run python -m app.cli checklist generate \
+  --case-id 00000000-0000-0000-0000-000000000001 \
+  --template commercial_contract
+```
+
+**LLM provider:** set `LLM_PROVIDER=groq` and `GROQ_API_KEY` in `.env` for fast cloud generation (~60–110 s per checklist depending on template size), or `LLM_PROVIDER=ollama` for fully local operation (requires `ollama pull qwen3:8b nomic-embed-text` first).
+
+**macOS note:** for long-running local jobs, prefix with `caffeinate -i` to prevent App Nap from throttling Ollama mid-run.
+
+---
+
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                          Client Layer                           │
-│                                                                 │
-│   ┌──────────────────┐          ┌──────────────────────────┐   │
-│   │  Streamlit UI    │          │  REST / SSE (FastAPI)    │   │
-│   │  :8501           │◄────────►│  :8000                   │   │
-│   └──────────────────┘          └────────────┬─────────────┘   │
-└────────────────────────────────────────────── │ ────────────────┘
-                                                │
-          ┌─────────────────────────────────────┼──────────────────────┐
-          │                                     │                      │
-          ▼                                     ▼                      ▼
-  ┌───────────────┐                   ┌─────────────────┐    ┌────────────────┐
-  │   Ingestion   │                   │   Generation    │    │   Learning     │
-  │   Pipeline    │                   │  (LangGraph)    │    │   Pipeline     │
-  └───────┬───────┘                   └────────┬────────┘    └───────┬────────┘
-          │                                    │                     │
-          ▼                                    ▼                     ▼
-  ┌───────────────────────────────────────────────────────────────────────────┐
-  │                         Postgres 16 + pgvector                            │
-  │                                                                           │
-  │  documents  pages  chunks          checklists  checklist_items            │
-  │  ┌────────────────────────┐        ┌──────────────────────────────────┐  │
-  │  │ embedding  vector(768) │        │ evidence_citations               │  │
-  │  │ tsv        tsvector    │        │ edit_events  (append-only)       │  │
-  │  │ HNSW (cosine)  GIN     │        │ learned_patterns  few_shot_examples│ │
-  │  └────────────────────────┘        └──────────────────────────────────┘  │
-  └───────────────────────────────────────────────────────────────────────────┘
-          │                                    │
-          ▼                                    ▼
-  ┌───────────────┐                   ┌─────────────────┐
-  │  Ollama       │                   │   Langfuse      │
-  │  nomic-embed  │                   │   (tracing)     │
-  │  :11434       │                   │   :3000         │
-  └───────────────┘                   └─────────────────┘
-          │
-  ┌───────┴───────┐
-  │  Groq API     │  ← primary LLM (llama-3.3-70b / llama-3.1-8b)
-  │  or           │
-  │  Ollama LLM   │  ← fallback (qwen3:8b)
-  └───────────────┘
+│  INGESTION                                                       │
+│  PDFs / JPGs ──▶ Marker (Surya OCR) ──▶ blocks                  │
+│                  ├─ confidence < 0.6 ──▶ TrOCR fallback         │
+│                  └─ structured extraction (LLM)                  │
+└─────────────────────────────┬───────────────────────────────────┘
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  RETRIEVAL                                                       │
+│  Blocks ──▶ section-aware chunking ──▶ windows + parent sections │
+│             ──▶ nomic-embed-text (768d, HNSW cosine)             │
+│             ──▶ tsvector (BM25 via ts_rank_cd)                   │
+│  Query ──▶ dense ‖ sparse ──▶ RRF (k=60) ──▶ parent expansion   │
+│             ──▶ SearchHit (with context_text)                    │
+└─────────────────────────────┬───────────────────────────────────┘
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  GENERATION (LangGraph)                                          │
+│  classify ▶ load_template ▶ FOR EACH ITEM:                       │
+│      retrieve_evidence ▶ draft_item ▶ validate (V1–V5) ▶ critique│
+│  ▶ assemble                                                      │
+│  Output: Checklist with grounded items + EvidenceCitations       │
+└─────────────────────────────┬───────────────────────────────────┘
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  LEARNING (edit loop)                                            │
+│  Operator PATCH/POST/DELETE ──▶ typed EditEvent rows             │
+│  POST /finalize ──▶ pattern_extractor (1 LLM call)               │
+│      ──▶ LearnedPattern (promoted at corroboration≥3, conf≥0.7)  │
+│      ──▶ few_shot_examples (cosine-retrieved at draft time)      │
+│  Next generation: load_template applies template mutations,      │
+│                   critique applies rename/style/status rules     │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Document Ingestion Flow
+## Example output
 
+A single generated checklist item, showing the grounding in full (UUIDs omitted for readability):
+
+```json
+{
+  "title": "Term and duration",
+  "category": "Deadlines",
+  "status": "present",
+  "required": true,
+  "confidence": 0.94,
+  "rationale": "Section 11.1 specifies an initial term of one year commencing on
+    the Commencement Date, with automatic renewal unless either party gives 30 days
+    written notice prior to renewal.",
+  "evidence": [
+    {
+      "page_number": 10,
+      "char_offset_start": 4821,
+      "char_offset_end": 4973,
+      "snippet": "11.1 This agreement begins on the Commencement Date and continues
+        for an initial term of one (1) year, renewing automatically unless
+        terminated by written notice no fewer than thirty (30) days prior
+        to renewal.",
+      "retrieval_score": 0.91
+    }
+  ],
+  "learned_from_pattern_ids": []
+}
 ```
-POST /documents/upload
-        │
-        ▼
-  sha256(file) ──► already exists? ──► short-circuit (idempotent)
-        │ new
-        ▼
-  Marker OCR  ──────────────────────────────────────────────────────┐
-  (primary)                                                         │
-        │ low confidence / handwriting detected                     │
-        ▼                                                           │
-  TrOCR fallback                                                    │
-        │                                                           │
-        └──────────────────────────────────────────────────────────►│
-                                                                    ▼
-                                                     Structured extraction
-                                                     (DocumentMeta: parties,
-                                                      dates, monetary terms,
-                                                      sig blocks, doc_type)
-                                                                    │
-                                                                    ▼
-                                                          Chunking (semantic +
-                                                           structural boundaries)
-                                                                    │
-                                                                    ▼
-                                                     nomic-embed-text → vector(768)
-                                                     tsvector GENERATED ALWAYS AS
-                                                                    │
-                                                                    ▼
-                                                        INSERT chunks (pgvector)
-                                                        HNSW + GIN indexes
-```
+
+The validator enforces that `evidence` is non-empty whenever `status` is `"present"` — the constraint is in the Pydantic model, not downstream logic.
 
 ---
 
-## Checklist Generation (LangGraph Pipeline)
+## Tests
 
+```bash
+uv run pytest                          # unit tests (~5 s)
+uv run pytest tests/integration -v    # real Postgres (~30 s)
 ```
-POST /checklists/generate  →  SSE stream of node events
-        │
-        ▼
-┌───────────────────┐
-│  classify_doc_set │  DocumentMeta → pick checklist template
-└────────┬──────────┘
-         │
-         ▼
-┌────────────────────────┐
-│  load_template +       │  active checklist template +
-│  learned_patterns      │  promoted patterns (confidence ≥ 0.7, n ≥ 3)
-└────────┬───────────────┘
-         │
-         │  for each template item  (asyncio.gather, capped concurrency)
-         ▼
-┌────────────────────────┐
-│  retrieve_evidence     │  hybrid search: HNSW dense + GIN tsvector → RRF fusion
-└────────┬───────────────┘
-         │
-         ▼
-┌────────────────────────┐
-│  draft_item            │  LLM (quality model) + CIPHER few-shot:
-│                        │  top-3 (original_draft → edited_final) from
-│                        │  few_shot_examples, filtered by doc_type
-└────────┬───────────────┘
-         │
-         ▼
-┌────────────────────────┐
-│  validate_item         │  cited pages exist in source doc?
-│                        │  status="present" → evidence non-empty?
-│                        │  hallucinated citation → coerce to "unclear"
-└────────┬───────────────┘
-         │
-         ▼
-┌────────────────────────┐
-│  critique              │  apply active learned_patterns, rewrite on violation
-└────────┬───────────────┘
-         │
-         ▼
-┌────────────────────────┐
-│  assemble_checklist    │  → Checklist with evidence citations
-└────────────────────────┘
-```
+
+Integration tests run against a real Postgres instance with SAVEPOINT-per-test isolation — no mocked sessions — so constraint violations and schema drift surface in CI rather than production.
 
 ---
 
-## Edit Loop & Learning
+## Evaluation
 
-```
-Operator reviews checklist in UI
-        │
-        │  PATCH /checklists/{id}/items/{item_id}  (status, evidence, title, …)
-        ▼
-  edit_events  (append-only, 9 event types)
-  ┌────────────────────────────────────────────┐
-  │ item_added      item_removed               │
-  │ item_renamed    status_changed             │
-  │ evidence_added  evidence_corrected         │
-  │ category_reordered  item_text_rewritten    │
-  │ required_toggled                           │
-  └──────────────────┬─────────────────────────┘
-                     │
-  POST /checklists/{id}/finalize
-                     │
-                     ▼
-           pattern_extractor
-           (BackgroundTask)
-                     │
-                     ▼
-        corroborating_edit_count++
-                     │
-          ┌──────────┴──────────┐
-          │ count ≥ 3 AND       │
-          │ confidence ≥ 0.7    │
-          └──────────┬──────────┘
-                     │ promote
-                     ▼
-           learned_patterns
-           ┌──────────────────────────────┐
-           │ rename_rule                  │
-           │ template_addition/removal    │  ──► mutates active template
-           │ status_default               │
-           │ style_preference             │
-           │ category_remap               │
-           └──────────────────────────────┘
-                     │
-                     ▼
-           few_shot_examples  (CIPHER bank)
-           used in next draft_item node
-```
+### Results by area
+
+| Area | Metric | Result |
+|---|---|---|
+| Document processing | 8 docs ingested (5 CUAD contracts + 2 degraded + 1 handwritten) | Marker OCR at 0.95+ confidence on clean docs; TrOCR fallback fired on handwritten exhibit — mediocre output that still ranks #2 on semantic queries due to embedding robustness |
+| Grounded retrieval | 271 searchable windows across 8 docs; hybrid dense+sparse+RRF | Avg 2.2–2.3 citations per `present` item; handwritten exhibit findable via semantic embedding despite OCR noise |
+| Draft quality | 12-item `commercial_contract` template | 10–11 of 12 items resolve to `present` per run; SQL invariant `present ∧ evidence=∅` returns 0 rows — grounding is a hard constraint |
+| Improvement loop | 4-run loop closure | 1 pattern promoted at corroboration=3; applied autonomously in Run 4 — mean_edit_distance 1.58 → 0.00, touch_free_rate 91.7% → 100% |
+
+### Loop demonstration
+
+`touch_free_rate` = share of items needing zero operator edits. `pattern_application_rate` = share of items whose `learned_from_pattern_ids` is non-empty.
+
+| Run | edits_applied | mean_edit_distance | touch_free_rate | pattern_application_rate | promoted_patterns |
+|---|---|---|---|---|---|
+| 1 | 1 | 1.58 | 91.7% | 0.0% | 0 |
+| 2 | 1 | 1.58 | 91.7% | 0.0% | 0 |
+| 3 | 1 | 1.58 | 91.7% | 0.0% | 1 |
+| 4 | 0 | 0.0 | 100.0% | 8.3% | 1 |
+
+Run 3's finalize step is what promotes the first rule (corroboration crosses 3), but Run 3's generation had already completed before promotion — so pattern_application_rate stays 0% for Run 3. Run 4 starts with the promoted pattern active: `critique` applies it at draft time, no operator edit is needed, and mean_edit_distance drops from 1.58 to 0.00. The loop closed automatically. Raw JSON in `eval/results_loop.md`.
 
 ---
 
-## Key Invariants
+## What I built and why
 
-| Rule | Where enforced |
-|------|---------------|
-| `status="present"` requires non-empty `evidence` | `ChecklistItem` Pydantic validator + `validate_item` node |
-| Hallucinated citation → coerce to `"unclear"`, never `"present"` | `validate_item` node |
-| Embeddings always local (`nomic-embed-text`) regardless of LLM provider | `app/core/config.py` |
-| Edit events are append-only | Convention; no UPDATE/DELETE on `edit_events` |
-| LLM provider swap is one env var (`LLM_PROVIDER=groq\|ollama`) | `app/core/llm.py` |
+- **Grounding is enforced, not hoped for.** The V1–V5 invariants at the LangGraph validation node reject hallucinated page references and coerce ambiguous evidence to `unclear` rather than letting the LLM fill in the gap. A SQL invariant (`COUNT WHERE status='present' AND evidence=∅`) returns zero rows across every generation — not a policy, a hard constraint.
+
+- **Parent expansion solves the chunking-vs-grounding tension.** Retrieval ranks at the 512-token window level for precision; generation receives the full parent section (up to 3,500 tokens) for context fidelity. Citations still anchor to the precise span — you get signal from dense retrieval and context from the surrounding clause without giving up either.
+
+- **The improvement loop is real, not a diff viewer.** Operator edits (PATCH, DELETE, status corrections) land as typed `EditEvent` rows. A single background LLM call per finalized checklist distills corroborating edits into `LearnedPattern` rules across six pattern types: `rename_rule`, `template_addition`, `template_removal`, `status_default`, `style_preference`, `category_remap`. Promotion is gated on ≥3 corroborating edits and confidence ≥0.7. Promoted rules apply automatically via `load_template` and `critique` on the next run. Mechanically: operator edits are mined into rules that promote at a corroboration threshold, then re-enter the generation prompt as exemplars and template mutations on the next run.
+
+- **OCR triage handles both clean and messy inputs.** Marker (Surya) processes printed contracts at roughly 95% confidence. Blocks below 0.6 confidence fall back to `microsoft/trocr-large-handwritten`. The handwritten exhibit's phrase "code for the platform" came through as "code for the patforn" — yet the dense embedding retrieved the document at rank #2 on the query `customer lists pricing models`, because semantic similarity survives OCR noise that exact-match would not.
+
+- **Provider abstraction without vendor lock-in.** The same `init_chat_model` interface switches between Groq `llama-3.3-70b-versatile` and Ollama `qwen3:8b` via a single `LLM_PROVIDER` environment variable. Groq completes a 10–12 item checklist in roughly 60–110 seconds on the free tier; Ollama runs locally for users who don't want to supply API keys.
+
+- **Quality signals are embedded, not bolted on.** Tests run against a real Postgres instance via a SAVEPOINT-per-test fixture — no mocked DB calls. Pydantic schemas split into `Draft` (permissive, for LLM output) and strict (for the API boundary), catching schema drift early. Exception handling uses a narrow `_RECOVERABLE` tuple rather than bare `except Exception`. A multi-engineer agent review cycle (data, ML, QA) runs at every phase boundary and has caught real bugs at every phase boundary.
 
 ---
 
-## Stack
+## Known limitations and what I'd do next
 
-| Concern | Choice |
-|---------|--------|
-| API | FastAPI + SSE (`sse-starlette`) |
-| State machine | LangGraph 1.x |
-| LLM (primary) | Groq `llama-3.3-70b-versatile` / `llama-3.1-8b-instant` |
-| LLM (fallback) | Ollama `qwen3:8b` / `llama3.1:8b` |
-| Embeddings | Ollama `nomic-embed-text` 768-dim |
-| OCR | Marker (primary) · TrOCR (handwriting) |
-| DB | Postgres 16 + pgvector · HNSW + GIN |
-| Observability | Langfuse (LangChain callback) · loguru |
-| UI | Streamlit |
-| Env | Python 3.12 · uv · ruff · mypy --strict |
+- **TrOCR quality on the handwritten exhibit is mediocre.** The source photo has enough noise that several phrases come through garbled. A cleaner scan would improve recall on handwriting-specific queries — the retrieval logic is solid, the bottleneck is image quality.
+
+- **Pattern extraction requires edit volume to become useful.** The corroboration threshold (≥3 edits) is intentionally conservative to avoid promoting noise into the prompt. With only the demo documents, patterns promote slowly; a real deployment would see enough operator traffic to fill the loop quickly.
+
+- **Operator identity is wired but unauthenticated.** Every `EditEvent` carries an `actor` field populated from the `X-Operator-Id` header — the surface for a real IdP is in place. Binding it to Cognito, Auth0, or any FastAPI `Depends` provider is a configuration change rather than an architectural one.
+
+- **Groq free-tier throughput limits eval iteration.** At ~100K tokens per day, a back-to-back 4-run eval can exhaust the quota mid-run. The eval harness resets learning state per session so iteration is cheap once quota refreshes; production would use a paid tier or self-hosted endpoint.
