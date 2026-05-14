@@ -65,12 +65,18 @@ def pg_engine():
     import sqlalchemy
     from sqlalchemy.ext.asyncio import create_async_engine
 
+    from sqlalchemy.engine.url import make_url
+
     from app.core.config import settings
 
-    test_url = str(settings.db_url).replace("/lexicon", "/lexicon_test")
+    # Use URL object to replace only the database name (str() masks password as ***).
+    test_url_obj = make_url(str(settings.db_url)).set(database="lexicon_test")
 
     async def _try_connect():
-        engine = create_async_engine(test_url, echo=False)
+        from sqlalchemy.pool import NullPool
+        # NullPool avoids asyncpg connections being bound to the asyncio.run() loop,
+        # which would cause "Future attached to a different loop" in per-test event loops.
+        engine = create_async_engine(test_url_obj, echo=False, poolclass=NullPool)
         try:
             async with engine.connect() as conn:
                 await conn.execute(sqlalchemy.text("SELECT 1"))
@@ -99,7 +105,8 @@ def pg_schema(pg_engine):
     from alembic.config import Config
 
     cfg = Config("alembic.ini")
-    test_url = str(pg_engine.url).replace("+asyncpg", "")
+    # render_as_string(hide_password=False) preserves password; str() masks it as ***.
+    test_url = pg_engine.url.render_as_string(hide_password=False)
     cfg.set_main_option("sqlalchemy.url", test_url)
     command.upgrade(cfg, "head")
     return pg_engine

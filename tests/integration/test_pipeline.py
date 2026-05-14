@@ -16,8 +16,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import settings
 from app.generation.graph import build_graph
@@ -41,9 +40,13 @@ _CASE_ID = uuid.uuid4()
 def engine():
     """Async engine for lexicon_test; skips if unreachable."""
     import sqlalchemy
+    from sqlalchemy.engine.url import make_url
+    from sqlalchemy.pool import NullPool
 
-    test_url = str(settings.db_url).replace("/lexicon", "/lexicon_test")
-    eng = create_async_engine(test_url, echo=False)
+    # Use URL object so only the database name is swapped (str.replace would also
+    # corrupt the username).  NullPool avoids event-loop-binding issues with asyncpg.
+    test_url_obj = make_url(str(settings.db_url)).set(database="lexicon_test")
+    eng = create_async_engine(test_url_obj, echo=False, poolclass=NullPool)
 
     async def _ping() -> None:
         async with eng.connect() as conn:
@@ -61,7 +64,7 @@ def engine():
 
 @pytest.fixture(scope="module")
 def session_factory(engine):
-    return sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    return async_sessionmaker(engine, expire_on_commit=False)
 
 
 @pytest.fixture(scope="module")
@@ -100,7 +103,7 @@ def seeded_case(session_factory):
                              text, embedding, parent_section_id, meta)
                         VALUES
                             (:id, :doc_id, 1, 0, :end_off, :txt,
-                             CAST(:vec AS vector), NULL, :meta::jsonb)
+                             CAST(:vec AS vector), NULL, CAST(:meta AS jsonb))
                         """
                     ),
                     {
