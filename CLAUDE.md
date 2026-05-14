@@ -53,6 +53,7 @@ Grounded Document-Checklist Generator for messy legal documents. Take-home, 2-da
 - Defer scope, don't expand it. Cut list in PRD §14 is binding under time pressure.
 - The 25-point edit loop (Task 4) is the differentiator. Protect it from cuts.
 - For multi-session work, end with a one-paragraph note in `docs/planning/sessions/YYYY-MM-DD-<topic>.md`.
+- At each phase boundary (before commit), invoke relevant subagents to review the diff. Use the pattern "review the phase N implementation by the relevant engineers" — agents are read-heavy and find things the main session misses.
 
 ## Subagents
 
