@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from rapidfuzz.distance import Levenshtein
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, select, text
 
 from app.api.checklist_service import add_item as _svc_add
 from app.api.checklist_service import apply_item_patch as _svc_patch
@@ -44,6 +44,8 @@ from app.models.pydantic_models import Checklist, ChecklistItem, PartialChecklis
 from app.models.sqlalchemy_models import Checklist as ChecklistORM
 from app.models.sqlalchemy_models import ChecklistItem as ChecklistItemORM
 from app.models.sqlalchemy_models import EditEvent as EditEventORM
+from app.models.sqlalchemy_models import EvidenceCitation as EvidenceCitationORM
+from app.models.sqlalchemy_models import FewShotExample as FewShotExampleORM
 from app.models.sqlalchemy_models import LearnedPattern as LearnedPatternORM
 
 _EVAL_DIR = Path(__file__).parent
@@ -154,7 +156,10 @@ async def apply_edit_script(
         if delta < successes:
             raise RuntimeError(
                 f"Post-condition failed: applied {successes} ops but only {delta} "
-                f"new edit_events in DB (checklist_id={checklist_id})"
+                f"new edit_events in DB (checklist_id={checklist_id}). "
+                f"This usually means a promoted learned_pattern pre-applied the same "
+                f"change before the eval script ran — verify _reset_learning_state ran "
+                f"and no other writer is touching learned_patterns."
             )
 
     return successes
@@ -233,7 +238,51 @@ async def _compute_metrics(
     }
 
 
+async def _reset_learning_state(case_id: uuid.UUID) -> None:
+    """Wipe all learning state so the 4-run loop always starts from zero.
+
+    Production code never calls this. The eval must be idempotent; calling it
+    twice in a row should produce identical results.
+    """
+    async with SessionLocal() as session:
+        checklist_ids = (
+            await session.execute(
+                select(ChecklistORM.id).where(ChecklistORM.case_id == case_id)
+            )
+        ).scalars().all()
+
+        if checklist_ids:
+            # FK-safe deletion order: citations → edit_events → items → checklists.
+            await session.execute(
+                delete(EvidenceCitationORM).where(
+                    EvidenceCitationORM.checklist_item_id.in_(
+                        select(ChecklistItemORM.id).where(
+                            ChecklistItemORM.checklist_id.in_(checklist_ids)
+                        )
+                    )
+                )
+            )
+            await session.execute(
+                delete(EditEventORM).where(EditEventORM.checklist_id.in_(checklist_ids))
+            )
+            await session.execute(
+                delete(ChecklistItemORM).where(ChecklistItemORM.checklist_id.in_(checklist_ids))
+            )
+            await session.execute(
+                delete(ChecklistORM).where(ChecklistORM.id.in_(checklist_ids))
+            )
+
+        # learned_patterns and few_shot_examples are doc_type-scoped, not case-scoped.
+        # Wipe them globally — the eval is the sole writer in a dev/eval environment.
+        await session.execute(delete(FewShotExampleORM))
+        await session.execute(delete(LearnedPatternORM))
+        await session.commit()
+        print(f"  reset learning state for case_id={case_id} "
+              f"(removed {len(checklist_ids)} prior checklists)")
+
+
 async def run_eval(case_id: uuid.UUID) -> list[dict[str, Any]]:
+    await _reset_learning_state(case_id)
     results: list[dict[str, Any]] = []
     template = COMMERCIAL_CONTRACT
     run4_metrics: dict[str, Any] | None = None

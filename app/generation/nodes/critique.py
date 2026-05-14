@@ -23,6 +23,7 @@ from app.generation.state import ChecklistState
 from app.models.pydantic_models import (
     CategoryRemap,
     ChecklistItem,
+    CritiqueResult,
     LearnedPattern,
     RenameRule,
     StatusDefault,
@@ -30,7 +31,7 @@ from app.models.pydantic_models import (
 )
 
 _PROMPT_TEMPLATE = load_prompt("critique", version="v1")
-_LLM_TIMEOUT = 60
+_LLM_TIMEOUT = settings.llm_critique_timeout_s
 _RECOVERABLE = (ValidationError, asyncio.TimeoutError, httpx.HTTPError, ValueError)
 
 _ACTIONABLE_TYPES = frozenset(
@@ -39,14 +40,15 @@ _ACTIONABLE_TYPES = frozenset(
 
 
 def _match_rename_rule(rule: RenameRule, item: ChecklistItem) -> bool:
-    if rule.scope_category and rule.scope_category != item.category:
+    if rule.scope_category and rule.scope_category.lower() != str(item.category).lower():
         return False
     return rule.from_text.lower() in item.title.lower()
 
 
 def _match_status_default(rule: StatusDefault, item: ChecklistItem) -> bool:
-    if item.source_template_item_id is not None:
-        return str(item.source_template_item_id).endswith(rule.item_slug)
+    # UUID endswith a slug is never true; fall through to the title-based check.
+    if item.source_template_item_id is not None and str(item.source_template_item_id).endswith(rule.item_slug):
+        return True
     return rule.item_slug.lower() in item.title.lower().replace(" ", "_")
 
 
@@ -112,7 +114,9 @@ async def critique(state: ChecklistState) -> dict[str, object]:
         [{"pattern_type": p.pattern_type, "rule_json": p.rule_json} for p in matched],
         default=str,
     )
-    schema_json = json.dumps(ChecklistItem.model_json_schema(), indent=2)
+    # CritiqueResult excludes evidence/confidence/id — the LLM never sees them in the
+    # schema, so it can't accidentally omit evidence and trigger evidence_required_when_present.
+    schema_json = json.dumps(CritiqueResult.model_json_schema(), indent=2)
     item_json = item.model_dump_json()
 
     # Use .replace() not .format() — JSON braces in schema break .format() (L7).
@@ -123,7 +127,7 @@ async def critique(state: ChecklistState) -> dict[str, object]:
         .replace("{item_json}", item_json)
     )
 
-    model = get_chat_model(role="quality").with_structured_output(ChecklistItem)
+    model = get_chat_model(role="quality").with_structured_output(CritiqueResult)
 
     try:
         if settings.llm_provider == "groq":
@@ -134,23 +138,28 @@ async def critique(state: ChecklistState) -> dict[str, object]:
         else:
             result = await asyncio.wait_for(model.ainvoke(prompt_text), timeout=_LLM_TIMEOUT)
 
-        if not isinstance(result, ChecklistItem):
+        if not isinstance(result, CritiqueResult):
             raise ValueError(f"Unexpected output: {type(result)}")
 
     except _RECOVERABLE as exc:
-        logger.bind(item_slug=slug, error=str(exc)[:120]).warning(
-            "critique_llm_failed_fallback"
-        )
+        reason = "LLM call timed out" if isinstance(exc, asyncio.TimeoutError) else (str(exc) or repr(exc))[:120]
+        logger.bind(item_slug=slug, error=reason).warning("critique_llm_failed_fallback")
         # Never fail the pipeline — fall back to un-critiqued item.
         return {}
 
-    # Preserve immutable fields from original; only accept field rewrites from LLM.
-    corrected = result.model_copy(
+    # Merge mutable LLM-rewritten fields onto the original item; restore all immutable fields.
+    corrected = item.model_copy(
         update={
-            "id": item.id,
-            "source_template_item_id": item.source_template_item_id,
+            "title": result.title,
+            "description": result.description,
+            "rationale": result.rationale,
+            "category": result.category,
+            "status": result.status,
+            "required": result.required,
             "evidence": item.evidence,
             "confidence": item.confidence,
+            "id": item.id,
+            "source_template_item_id": item.source_template_item_id,
             "learned_from_pattern_ids": [p.id for p in matched],
         }
     )

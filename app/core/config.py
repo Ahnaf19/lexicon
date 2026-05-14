@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     langfuse_secret_key: SecretStr | None = None
     langfuse_host: AnyHttpUrl | None = None
 
+    # Per-call-site LLM timeouts (seconds). Separate knobs because foreground
+    # (draft/critique) and background (extract) have different SLOs.
+    llm_draft_timeout_s: int = 120
+    llm_critique_timeout_s: int = 120
+    llm_extract_timeout_s: int = 300
+
     log_level: str = "INFO"
     env: Literal["dev", "prod"] = "dev"
 

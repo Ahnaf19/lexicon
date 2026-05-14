@@ -138,6 +138,33 @@ class ChecklistItem(BaseModel):
         return self
 
 
+class CritiqueResult(BaseModel):
+    """Mutable fields the critique LLM may rewrite.
+
+    Immutable fields (id, evidence, confidence, source_template_item_id,
+    learned_from_pattern_ids) are never sent to the LLM and are restored from
+    the original ChecklistItem by the critique node after the LLM call.
+    Using this slim schema avoids the evidence_required_when_present validator
+    firing on the LLM output before evidence can be restored.
+    """
+
+    title: str
+    description: str
+    rationale: str
+    category: Literal[
+        "Parties",
+        "Financial Terms",
+        "Required Exhibits",
+        "Signatures",
+        "Deadlines",
+        "Consents",
+        "Disclosures",
+        "Other",
+    ]
+    status: Literal["present", "missing", "unclear"]
+    required: bool
+
+
 class Checklist(BaseModel):
     id: UUID
     case_id: UUID

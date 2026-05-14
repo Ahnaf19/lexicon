@@ -17,7 +17,9 @@ from pydantic import ValidationError
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
+from app.core.config import settings
 from app.core.db import SessionLocal
 from app.core.llm import get_chat_model
 from app.generation.prompts import load_prompt
@@ -36,7 +38,7 @@ from app.models.sqlalchemy_models import (
 from app.retrieval.embedding import embed_query
 
 _PROMPT_TEMPLATE = load_prompt("pattern_extraction", version="v1")
-_LLM_TIMEOUT = 30  # L1: 30s timeout
+_LLM_TIMEOUT = settings.llm_extract_timeout_s
 # Only retry on LLM output issues; do NOT retry on TimeoutError (doubles the 30s window).
 _RECOVERABLE = (ValidationError, ValueError)
 
@@ -98,7 +100,7 @@ async def extract_patterns(checklist_id: uuid.UUID) -> None:
     try:
         await _extract_patterns_inner(checklist_id)
     except Exception as exc:
-        log.bind(error=str(exc)[:200]).error("extract_patterns_failed")
+        log.bind(error=(str(exc) or repr(exc))[:200]).error("extract_patterns_failed")
         # Best-effort: record the failure in eval_metrics without raising.
         try:
             async with SessionLocal() as session:
@@ -169,8 +171,11 @@ async def _extract_patterns_inner(checklist_id: uuid.UUID) -> None:
         # LLM call (L1: one call, one retry on ValidationError).
         try:
             drafts = await _call_extraction_llm(events_json, existing_json)
+        except asyncio.TimeoutError:
+            log.bind(error="LLM call timed out").error("extraction_llm_failed")
+            return
         except Exception as exc:
-            log.bind(error=str(exc)[:200]).error("extraction_llm_failed")
+            log.bind(error=repr(exc)[:200]).error("extraction_llm_failed")
             return
 
         # Validate and upsert patterns (P1 invariant enforced here).
@@ -279,10 +284,10 @@ async def _upsert_pattern(
     )
 
     if existing is not None:
-        # Union the supporting edit ids.
+        # Union the supporting edit ids (as UUID objects for ARRAY(UUID) column).
         merged_ids = list(
-            {str(eid) for eid in (existing.supporting_edit_ids or [])}
-            | {str(eid) for eid in valid_ids}
+            {uuid.UUID(str(eid)) for eid in (existing.supporting_edit_ids or [])}
+            | {uuid.UUID(str(eid)) for eid in valid_ids}
         )
         # P5: if pattern was dismissed, only count edits after dismissal timestamp.
         dismissed_at = None
@@ -337,7 +342,7 @@ async def _upsert_pattern(
                 pattern_type=draft.pattern_type,
                 doc_type_scope=draft.doc_type_scope,
                 rule_json=draft.rule_json,
-                supporting_edit_ids=[str(eid) for eid in valid_ids],
+                supporting_edit_ids=[uuid.UUID(str(eid)) for eid in valid_ids],
                 confidence=confidence,
                 corroborating_edit_count=count,
                 promoted=promoted,
@@ -355,6 +360,7 @@ async def _write_few_shot_examples(
     doc_type: str,
 ) -> None:
     """Write few_shot_examples for items that have at least one edit event."""
+    now = datetime.now(timezone.utc)
     # Collect item_ids that were edited in this checklist.
     edited_item_ids = {
         row.checklist_item_id
@@ -364,9 +370,12 @@ async def _write_few_shot_examples(
     if not edited_item_ids:
         return
 
-    # Load current (final) state of those items.
+    # Load current (final) state of those items — eager-load citations to avoid
+    # lazy-load greenlet_spawn error in async context (_orm_to_checklist_item accesses them).
     items_result = await session.execute(
-        select(ChecklistItemORM).where(
+        select(ChecklistItemORM)
+        .options(selectinload(ChecklistItemORM.citations))
+        .where(
             ChecklistItemORM.checklist_id == checklist_id,
             ChecklistItemORM.id.in_(edited_item_ids),
         )

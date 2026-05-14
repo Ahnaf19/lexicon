@@ -20,7 +20,13 @@ EXISTING PATTERNS (for context — do not re-emit if already present; instead re
 USER: Analyse the edit events and extract patterns. For each pattern in the "patterns" array:
 - pattern_type must be one of: rename_rule, template_addition, template_removal, status_default, style_preference, category_remap
 - doc_type_scope is the document type these events came from (or "*" if cross-type)
-- rule_json encodes the pattern details (see schema for each pattern_type)
+- rule_json must use EXACTLY these field names for each pattern_type:
+  * rename_rule:        {"from_text": "<substring of old title>", "to_text": "<replacement text>", "scope_category": "<checklist item category, e.g. 'Parties' — omit if the rename applies across all categories>"}
+  * status_default:     {"item_slug": "<slug>", "default_status": "<present|missing|unclear>"}
+  * style_preference:   {"instruction": "<phrasing instruction for the LLM>"}
+  * category_remap:     {"matches_title_regex": "<regex pattern>", "new_category": "<target category>"}
+  * template_addition:  {"title": "<item title>", "category": "<category>", "required": true}
+  * template_removal:   {"item_slug": "<slug>", "reason": "<why removed>"}
 - supporting_edit_ids: list of event ids from the EDIT EVENTS section that support this pattern
 - rationale: one sentence explaining why this is a genuine operator preference, not a one-off
 

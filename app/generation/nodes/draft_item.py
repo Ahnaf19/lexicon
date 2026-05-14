@@ -26,7 +26,7 @@ _STRICT_SUFFIX = (
     "Return ONLY valid JSON matching the schema. No prose, no markdown fences."
 )
 
-_LLM_TIMEOUT = 60  # seconds per G2
+_LLM_TIMEOUT = settings.llm_draft_timeout_s
 
 
 def _build_evidence_blocks(hits: list[SearchHit]) -> str:
@@ -97,6 +97,21 @@ async def draft_item(state: ChecklistState) -> dict[str, object]:
     item = next(i for i in template.items if i.slug == slug)
     hits = (state.get("search_hits_by_item") or {}).get(slug, [])
     learned_patterns: list[LearnedPattern] = list(state.get("learned_patterns") or [])
+    model_version = (
+        settings.ollama_model_quality
+        if settings.llm_provider == "ollama"
+        else settings.groq_model_quality
+    )
+
+    # Fast-path: no evidence retrieved → skip LLM, validate_item enforces
+    # "present requires evidence" anyway, so any LLM guess would be overridden.
+    if not hits:
+        in_progress = dict(state.get("items_in_progress") or {})
+        in_progress[slug] = {
+            "_draft": _coerce_unclear("No evidence retrieved; item presence cannot be determined."),
+            "_template_item": item,
+        }
+        return {"items_in_progress": in_progress, "model_version": model_version}
 
     evidence_blocks = _build_evidence_blocks(hits)
     evidence_summary = " ".join(h.snippet for h in hits)[:500]
@@ -132,12 +147,6 @@ async def draft_item(state: ChecklistState) -> dict[str, object]:
         .replace("{evidence_blocks}", evidence_blocks)
     )
 
-    model_version = (
-        settings.ollama_model_quality
-        if settings.llm_provider == "ollama"
-        else settings.groq_model_quality
-    )
-
     # Recoverable LLM failures: validation error (bad JSON), timeout, provider HTTP errors.
     # Infrastructure errors (ImportError, AttributeError, etc.) propagate and fail the run.
     _RECOVERABLE = (ValidationError, asyncio.TimeoutError, httpx.HTTPError, ValueError)
@@ -160,7 +169,7 @@ async def draft_item(state: ChecklistState) -> dict[str, object]:
                 if isinstance(second_exc, asyncio.TimeoutError)
                 else "LLM failed to produce valid item structure"
             )
-            logger.bind(item_slug=slug, error=str(second_exc)[:120]).warning(
+            logger.bind(item_slug=slug, error=second_reason).warning(
                 "draft_item_second_attempt_failed"
             )
             draft = _coerce_unclear(second_reason)
