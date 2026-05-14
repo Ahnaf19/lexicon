@@ -1,7 +1,8 @@
-"""Shared pytest fixtures for unit tests — no real DB, no real models."""
+"""Shared pytest fixtures — fake DB for unit tests; real Postgres for integration tests."""
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections import defaultdict
 from contextlib import asynccontextmanager
@@ -9,10 +10,113 @@ from typing import Any, AsyncGenerator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from pydantic import BaseModel
 
 from app.ingestion.models import Block
 from app.models.pydantic_models import BBox, DocumentMeta
+
+
+# ---------------------------------------------------------------------------
+# FakeListChatModel fixture — stubs app.core.llm.get_chat_model
+# ---------------------------------------------------------------------------
+
+
+def make_fake_chat_model(responses: list[str]) -> FakeListChatModel:
+    """Build a FakeListChatModel that cycles through JSON string responses."""
+    return FakeListChatModel(responses=responses)
+
+
+@pytest.fixture
+def patch_llm(monkeypatch: pytest.MonkeyPatch):
+    """Replace get_chat_model with a factory returning a FakeListChatModel.
+
+    Tests that need specific responses should use make_fake_chat_model directly
+    and monkeypatch app.core.llm.get_chat_model themselves.
+    """
+    fake = make_fake_chat_model(['{"status":"unclear","confidence":0.5,"rationale":"stub","cited_evidence":[]}'])
+
+    def _factory(role: str = "quality") -> FakeListChatModel:
+        return fake
+
+    monkeypatch.setattr("app.core.llm.get_chat_model", _factory)
+    return fake
+
+
+# ---------------------------------------------------------------------------
+# Real-Postgres session fixture (integration tests only)
+# ---------------------------------------------------------------------------
+
+try:
+    import asyncpg  # noqa: F401
+    _ASYNCPG_AVAILABLE = True
+except ImportError:
+    _ASYNCPG_AVAILABLE = False
+
+
+@pytest.fixture(scope="session")
+def pg_engine():
+    """Session-scoped async engine pointing at lexicon_test.
+
+    Skips if Postgres is unreachable so unit tests still pass in isolation.
+    """
+    import asyncio
+
+    import sqlalchemy
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from app.core.config import settings
+
+    test_url = str(settings.db_url).replace("/lexicon", "/lexicon_test")
+
+    async def _try_connect():
+        engine = create_async_engine(test_url, echo=False)
+        try:
+            async with engine.connect() as conn:
+                await conn.execute(sqlalchemy.text("SELECT 1"))
+            return engine
+        except Exception as exc:
+            await engine.dispose()
+            raise exc
+
+    try:
+        engine = asyncio.run(_try_connect())
+    except Exception as exc:
+        pytest.skip(f"Postgres unreachable for integration tests: {exc}")
+        return  # never reached
+
+    yield engine
+
+    asyncio.run(engine.dispose())
+
+
+@pytest.fixture(scope="session")
+def pg_schema(pg_engine):
+    """Run alembic upgrade head once per session on lexicon_test."""
+    import asyncio
+
+    from alembic import command
+    from alembic.config import Config
+
+    cfg = Config("alembic.ini")
+    test_url = str(pg_engine.url).replace("+asyncpg", "")
+    cfg.set_main_option("sqlalchemy.url", test_url)
+    command.upgrade(cfg, "head")
+    return pg_engine
+
+
+@pytest.fixture
+def pg_session(pg_schema):
+    """Per-test async session factory with SAVEPOINT rollback for isolation."""
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    async def _get():
+        async with AsyncSession(pg_schema) as session:
+            async with session.begin():
+                yield session
+                await session.rollback()
+
+    return _get
 
 
 # ---------------------------------------------------------------------------
