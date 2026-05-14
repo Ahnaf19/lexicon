@@ -108,6 +108,8 @@ def _aggregate_meta(
     pages_seen: dict[int, list[dict[str, Any]]] = {}
     confidences: list[float] = []
     has_handwriting = False
+    engines_seen: set[str] = set()
+    any_low_conf = False
 
     for idx in range(lo, hi + 1):
         m = source_blocks[idx]
@@ -118,6 +120,9 @@ def _aggregate_meta(
         confidences.append(conf)
         if m.get("is_handwriting", False):
             has_handwriting = True
+        engines_seen.add(m.get("ocr_engine", "marker"))
+        if m.get("low_ocr_confidence", False):
+            any_low_conf = True
 
     pages_spanned = sorted(pages_seen.keys())
     mean_conf = sum(confidences) / len(confidences) if confidences else 1.0
@@ -127,6 +132,9 @@ def _aggregate_meta(
         "bboxes_per_page": {str(pg): bboxes for pg, bboxes in pages_seen.items()},
         "mean_ocr_confidence": round(mean_conf, 4),
         "has_handwriting": has_handwriting,
+        # Propagate provenance fields required by app/ingestion/CLAUDE.md
+        "ocr_engine": "trocr" if "trocr" in engines_seen else "marker",
+        "low_ocr_confidence": any_low_conf,
     }
 
 
@@ -228,7 +236,9 @@ async def rechunk_document(
                 found = search_start
             win_start_in_doc = sec_start + found
             win_end_in_doc = win_start_in_doc + len(win_text)
-            search_start = max(search_start, found + 1)
+            # Advance by the full window length so repeated phrases don't
+            # cause successive find() calls to return the same occurrence.
+            search_start = found + len(win_text)
 
             win_meta = _aggregate_meta(
                 source_metas,

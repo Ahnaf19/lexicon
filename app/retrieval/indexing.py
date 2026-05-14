@@ -113,7 +113,7 @@ async def index_document(
 
         # 5. Promote document status to "indexed"
         doc = await session.get(Document, doc_id)
-        if doc is not None and doc.status == "ocr_done":
+        if doc is not None and doc.status in {"ocr_done", "extraction_unclear"}:
             doc.status = "indexed"
 
         await session.commit()

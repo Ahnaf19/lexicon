@@ -29,7 +29,7 @@ from app.retrieval.embedding import embed_query
 
 
 class SearchHit(BaseModel):
-    """EvidenceCitation fields plus RRF rank provenance."""
+    """EvidenceCitation fields plus RRF rank provenance and full context for generation."""
 
     citation_id: uuid.UUID
     chunk_id: uuid.UUID
@@ -37,13 +37,15 @@ class SearchHit(BaseModel):
     page_number: int
     char_offset_start: int
     char_offset_end: int
-    snippet: str
+    snippet: str        # 300-char window text — citation display
+    context_text: str  # parent-section text (or window text if no parent); injected into LLM prompt
     retrieval_score: float
     rerank_score: float | None = None
     dense_rank: int | None = None
     sparse_rank: int | None = None
 
     def to_evidence_citation(self) -> EvidenceCitation:
+        # context_text is not part of EvidenceCitation — that's the slim storage/API contract
         return EvidenceCitation(
             citation_id=self.citation_id,
             chunk_id=self.chunk_id,
@@ -241,10 +243,10 @@ async def expand_with_parents(
         token_cost = len(_ENCODER.encode(context))
 
         if tokens_used + token_cost > budget_tokens and hits:
-            logger.bind(rank=rank_idx, tokens_used=tokens_used).debug(
-                "parent_expand_budget_reached"
-            )
-            break
+            logger.bind(
+                rank=rank_idx, token_cost=token_cost, tokens_used=tokens_used
+            ).debug("parent_expand_skip_oversized")
+            continue  # skip oversized entry; keep trying lower-ranked smaller parents
 
         hits.append(
             SearchHit(
@@ -255,6 +257,7 @@ async def expand_with_parents(
                 char_offset_start=row["char_offset_start"],
                 char_offset_end=row["char_offset_end"],
                 snippet=row["text"][:300],
+                context_text=context,  # full parent section (or window) for LLM prompt
                 retrieval_score=row["rrf_score"],
                 rerank_score=None,
                 dense_rank=row.get("dense_rank"),
