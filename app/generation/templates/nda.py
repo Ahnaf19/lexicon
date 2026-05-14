@@ -1,0 +1,91 @@
+"""NDA checklist template — 10 canonical items (PRD §5e)."""
+
+from app.generation.templates.types import ChecklistTemplate, TemplateItem
+
+NDA = ChecklistTemplate.make(
+    slug="nda",
+    name="Non-Disclosure Agreement",
+    doc_type="nda",
+    items=[
+        TemplateItem(
+            slug="parties",
+            title="Parties identified",
+            description="Disclosing and receiving parties to the NDA",
+            category="Parties",
+            required=True,
+            sub_query="parties to the agreement; licensor licensee buyer seller contracting parties",
+        ),
+        TemplateItem(
+            slug="effective_date",
+            title="Effective date",
+            description="Commencement or effective date of the NDA",
+            category="Deadlines",
+            required=True,
+            sub_query="effective date commencement date agreement dated",
+        ),
+        TemplateItem(
+            slug="definition_confidential",
+            title="Definition of confidential information",
+            description="What information is defined as confidential",
+            category="Disclosures",
+            required=True,
+            sub_query="confidential information defined including but not limited to",
+        ),
+        TemplateItem(
+            slug="permitted_use",
+            title="Permitted use restrictions",
+            description="Permitted uses and restrictions on disclosure of confidential information",
+            category="Other",
+            required=True,
+            sub_query="use solely for purpose limited use restrictions on disclosure",
+        ),
+        TemplateItem(
+            slug="exclusions",
+            title="Exclusions from confidentiality",
+            description="Information excluded from confidentiality obligations",
+            category="Disclosures",
+            required=True,
+            sub_query="publicly known independently developed exceptions to confidentiality",
+        ),
+        TemplateItem(
+            slug="term_survival",
+            title="Term and survival",
+            description="Duration of the NDA and obligations that survive termination",
+            category="Deadlines",
+            required=True,
+            sub_query="obligations survive term survive termination",
+        ),
+        TemplateItem(
+            slug="return_destruction",
+            title="Return or destruction of materials",
+            description="Obligation to return or destroy confidential materials upon termination",
+            category="Required Exhibits",
+            required=True,
+            sub_query="return or destroy confidential materials upon termination",
+        ),
+        TemplateItem(
+            slug="remedies",
+            title="Remedies and injunctive relief",
+            description="Available remedies for breach, including injunctive relief",
+            category="Other",
+            required=True,
+            sub_query="injunctive relief equitable remedies breach remedies",
+        ),
+        TemplateItem(
+            slug="governing_law",
+            title="Governing law and jurisdiction",
+            description="Choice of governing law and venue for disputes",
+            category="Other",
+            required=True,
+            sub_query="governing law jurisdiction venue choice of law",
+        ),
+        TemplateItem(
+            slug="signatures",
+            title="Signatures present",
+            description="Executed signature blocks by authorised signatories",
+            category="Signatures",
+            required=True,
+            sub_query="signed by signature block executed by",
+        ),
+    ],
+)

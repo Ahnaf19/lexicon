@@ -30,7 +30,7 @@ Always via `app.core.llm.get_chat_model(role="quality"|"fast")`. Never instantia
 
 ## Templates
 
-In `app/generation/templates/`. PoC ships `real_estate_closing.py` and `nda.py`. Each is a `ChecklistTemplate` with a list of canonical items, each carrying a sub-query template string used by retrieval.
+In `app/generation/templates/`. PoC ships `commercial_contract.py` and `nda.py`. Each is a `ChecklistTemplate` with a list of canonical items, each carrying a sub-query template string used by retrieval.
 
 ## Prompts
 
