@@ -31,20 +31,63 @@ from app.models.pydantic_models import ChunkProvenance
 from app.models.sqlalchemy_models import Chunk, Document, Page
 
 
+async def create_pending_document(
+    file_bytes: bytes,
+    filename: str,
+    mime: str,
+    case_id: uuid.UUID,
+    session: AsyncSession,
+) -> uuid.UUID:
+    """Insert a Document row with status='queued'; return its id.
+
+    Idempotent on sha256+case_id — returns the existing doc_id if already present.
+    Called synchronously in the upload handler so the returned id is immediately pollable.
+    """
+    sha256 = hashlib.sha256(file_bytes).hexdigest()
+    existing = await session.execute(
+        select(Document).where(
+            Document.sha256 == sha256,
+            Document.case_id == case_id,
+        )
+    )
+    row = existing.scalars().first()
+    if row is not None:
+        return row.id  # type: ignore[return-value]
+
+    doc_id = uuid.uuid4()
+    doc = Document(
+        id=doc_id,
+        case_id=case_id,
+        original_filename=filename,
+        mime=mime,
+        sha256=sha256,
+        status="queued",
+        uploaded_at=datetime.datetime.now(datetime.UTC),
+        meta={},
+    )
+    session.add(doc)
+    await session.commit()
+    return doc_id
+
+
 async def ingest_document(
     file_bytes: bytes,
     filename: str,
     mime: str,
     case_id: uuid.UUID,
+    doc_id: uuid.UUID | None = None,
     session_factory: async_sessionmaker[AsyncSession] = SessionLocal,
 ) -> uuid.UUID:
     """Ingest a PDF or image file; return the document UUID.
 
     Idempotent: re-uploading the same bytes for the same case returns the existing id.
-    All errors are recorded on the document row; this function never raises.
+    If doc_id is supplied (pre-created by create_pending_document), the existing row
+    is updated rather than re-inserted. All errors are recorded on the document row;
+    this function never raises.
     """
     sha256 = hashlib.sha256(file_bytes).hexdigest()
-    doc_id = uuid.uuid4()
+    if doc_id is None:
+        doc_id = uuid.uuid4()
 
     async with session_factory() as session:
         # -------------------------------------------------------------------
@@ -71,19 +114,28 @@ async def ingest_document(
 
         # -------------------------------------------------------------------
         # 3. Persist document row with status=ingesting
+        #    If a stub row already exists (created by create_pending_document),
+        #    update it in place rather than inserting.
         # -------------------------------------------------------------------
         now = datetime.datetime.now(datetime.UTC)
-        doc = Document(
-            id=doc_id,
-            case_id=case_id,
-            original_filename=filename,
-            mime=mime,
-            sha256=sha256,
-            status="ingesting",
-            uploaded_at=now,
-            meta={"original_mime": original_mime} if original_mime != mime else {},
-        )
-        session.add(doc)
+        existing_stub = await session.get(Document, doc_id)
+        if existing_stub is not None:
+            doc = existing_stub
+            doc.status = "ingesting"
+            doc.mime = mime
+            doc.sha256 = sha256
+        else:
+            doc = Document(
+                id=doc_id,
+                case_id=case_id,
+                original_filename=filename,
+                mime=mime,
+                sha256=sha256,
+                status="ingesting",
+                uploaded_at=now,
+                meta={"original_mime": original_mime} if original_mime != mime else {},
+            )
+            session.add(doc)
         await session.commit()
         logger.bind(doc_id=doc_id, filename=filename, mime=mime).info("ingest_started")
 

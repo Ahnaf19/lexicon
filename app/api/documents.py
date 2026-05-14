@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.db import get_session
-from app.ingestion.orchestrator import ingest_document
+from app.ingestion.orchestrator import create_pending_document, ingest_document
 from app.models.sqlalchemy_models import Chunk, Document, Page
 
 router = APIRouter()
@@ -59,16 +59,19 @@ async def upload_document(
 
     file_bytes = await file.read()
     filename = file.filename or "upload"
-    doc_id = uuid.uuid4()
+
+    # Insert a placeholder row synchronously so the returned id is immediately pollable.
+    doc_id = await create_pending_document(file_bytes, filename, mime, case_id, session)
 
     async def _ingest_then_index(
         file_bytes: bytes,
         filename: str,
         mime: str,
         case_id: uuid.UUID,
+        doc_id: uuid.UUID,
     ) -> None:
-        doc_id = await ingest_document(
-            file_bytes=file_bytes, filename=filename, mime=mime, case_id=case_id
+        await ingest_document(
+            file_bytes=file_bytes, filename=filename, mime=mime, case_id=case_id, doc_id=doc_id
         )
         if settings.auto_index:
             from app.retrieval.indexing import index_document  # lazy import avoids circular dep
@@ -81,6 +84,7 @@ async def upload_document(
         filename=filename,
         mime=mime,
         case_id=case_id,
+        doc_id=doc_id,
     )
     return UploadResponse(document_id=doc_id, status="queued")
 
