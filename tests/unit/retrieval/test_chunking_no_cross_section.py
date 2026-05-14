@@ -4,6 +4,9 @@ Tested structurally: rechunk_document must produce at least two sections for a
 two-section document, and return a non-zero window count. The code assigns each
 window exclusively to the section it was split from (parent_section_id = section_id),
 so cross-section windows are architecturally impossible given correct section detection.
+
+Also tests that repeated phrases in a section produce unique char_offset_start values
+(regression for the search_start += 1 bug that caused collisions on duplicate text).
 """
 
 from __future__ import annotations
@@ -136,3 +139,55 @@ async def test_single_section_document() -> None:
 
     assert section_count == 1
     assert window_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_window_offsets_unique_on_repeated_phrase() -> None:
+    """Windows produced from a section with a repeated 40-char prefix must each have
+    a unique char_offset_start (regression for the search_start += 1 bug).
+
+    The unit phrase 'As defined herein, this clause applies. ' is repeated 130 times,
+    producing 3 windows whose first 40 characters are identical. With the old code
+    (search_start += 1) all windows after the first would resolve to offset 0.
+    With the fix (search_start = found + len(win_text)) each is unique.
+    """
+    doc_id = uuid.uuid4()
+    # 130 repetitions → ~1044 tokens → 3 windows, all starting with the same 40-char phrase
+    unit = "As defined herein, this clause applies. "
+    text = "# Clause\n" + unit * 130
+
+    source = _make_chunk(text, doc_id)
+
+    class _RecordingSession(_FakeSession):
+        def __init__(self, chunks: list[Chunk]) -> None:
+            super().__init__(chunks)
+            self.inserted: list[dict[str, Any]] = []
+
+        async def execute(self, stmt: Any, params: Any = None) -> Any:
+            stmt_str = str(stmt).upper()
+            if "INSERT" in stmt_str:
+                if hasattr(stmt, "_multi_values") and stmt._multi_values:
+                    for row_group in stmt._multi_values:  # type: ignore[attr-defined]
+                        for row in row_group:
+                            self.inserted.append({col.key: val for col, val in row.items()})
+                return MagicMock()
+            return await super().execute(stmt, params)
+
+    session = _RecordingSession([source])
+
+    from app.retrieval.chunking import rechunk_document
+
+    window_count, _ = await rechunk_document(doc_id, session)  # type: ignore[arg-type]
+    assert window_count >= 2, (
+        f"Expected ≥2 windows from 1044-token text, got {window_count}"
+    )
+
+    window_offsets = [
+        row["char_offset_start"]
+        for row in session.inserted
+        if isinstance(row.get("meta"), dict) and row["meta"].get("kind") == "window"
+    ]
+    assert len(window_offsets) >= 2
+    assert len(window_offsets) == len(set(window_offsets)), (
+        f"Duplicate char_offset_start values: {window_offsets}"
+    )

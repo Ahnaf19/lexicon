@@ -44,13 +44,12 @@ class _FakeChunkSession:
     async def execute(self, stmt: Any, params: Any = None) -> Any:
         stmt_str = str(stmt)
         if "INSERT" in stmt_str.upper():
-            # Extract inserted values from the INSERT statement's compile params
-            # The rows are passed via insert().values([...])
-            compiled = stmt.compile()
-            # Walk the INSERT's VALUES and record them
-            if hasattr(stmt, "_values") and stmt._values:
-                for row_vals in stmt._values:  # type: ignore[attr-defined]
-                    self.inserted_rows.append({k.key: v.value for k, v in row_vals.items()})
+            # SQLAlchemy 2.x: insert().values([dict, ...]) stores rows in _multi_values
+            # as tuple[list[dict[Column, value]]]. Column keys must be accessed via col.key.
+            if hasattr(stmt, "_multi_values") and stmt._multi_values:
+                for row_group in stmt._multi_values:  # type: ignore[attr-defined]
+                    for row in row_group:
+                        self.inserted_rows.append({col.key: val for col, val in row.items()})
             return MagicMock()
         if "DELETE" in stmt_str.upper():
             return MagicMock()
@@ -98,7 +97,7 @@ async def test_rechunk_idempotent_row_count() -> None:
 
 @pytest.mark.asyncio
 async def test_rechunk_idempotent_window_texts() -> None:
-    """Two calls produce windows with identical sorted text sets."""
+    """Two calls produce windows with identical sorted text sets and char offsets."""
     doc_id = uuid.uuid4()
     text = "# Agreement\nThis NDA governs the sharing of information.\n" * 3
 
@@ -114,12 +113,26 @@ async def test_rechunk_idempotent_window_texts() -> None:
 
     texts1 = sorted(_window_texts(session1))
     texts2 = sorted(_window_texts(session2))
+
+    assert len(texts1) > 0, "Expected at least one window — inserted_rows may be empty (fake bug)"
     assert texts1 == texts2
+
+    offsets1 = sorted(_window_offsets(session1))
+    offsets2 = sorted(_window_offsets(session2))
+    assert offsets1 == offsets2, "char_offset_start values must be stable across re-runs"
 
 
 def _window_texts(session: _FakeChunkSession) -> list[str]:
     return [
         r.get("text", "") if isinstance(r, dict) else getattr(r, "text", "")
+        for r in session.inserted_rows
+        if _is_window(r)
+    ]
+
+
+def _window_offsets(session: _FakeChunkSession) -> list[int]:
+    return [
+        r.get("char_offset_start", -1) if isinstance(r, dict) else getattr(r, "char_offset_start", -1)
         for r in session.inserted_rows
         if _is_window(r)
     ]
