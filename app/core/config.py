@@ -27,5 +27,42 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     env: Literal["dev", "prod"] = "dev"
 
+    trocr_printed_threshold: float = 0.4
+
 
 settings = Settings()
+
+# ---------------------------------------------------------------------------
+# Propagate device-optimised Surya batch sizes to os.environ *before* Marker
+# is imported for the first time. Surya reads its own Settings() from os.environ
+# at import time (looks for local.env, not .env), so we must write here.
+# setdefault → operator can still override via shell env.
+# ---------------------------------------------------------------------------
+import os as _os  # noqa: E402
+
+import torch as _torch  # noqa: E402
+
+
+def _detect_device() -> str:
+    if _torch.cuda.is_available():
+        return "cuda"
+    if getattr(_torch.backends, "mps", None) and _torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+_DEVICE = _detect_device()
+
+_os.environ.setdefault("TORCH_DEVICE", _DEVICE)
+if _DEVICE in ("mps", "cpu"):
+    _os.environ.setdefault("DETECTOR_BATCH_SIZE", "8")
+    _os.environ.setdefault("RECOGNITION_BATCH_SIZE", "32")
+    # LAYOUT_BATCH_SIZE is intentionally left at Surya's default — raising it on MPS
+    # triggers an index-out-of-bounds in the vision encoder for large/unusual page sizes.
+    _os.environ.setdefault("TABLE_REC_BATCH_SIZE", "8")
+    _os.environ.setdefault("OCR_ERROR_BATCH_SIZE", "16")
+if _DEVICE == "mps":
+    # Default watermark ratio is ~0.5 on Apple Silicon (18 GB on 36 GB machines),
+    # which causes OOM when running multiple large docs in sequence. Setting to 0.0
+    # disables the cap so PyTorch can use all available unified memory.
+    _os.environ.setdefault("PYTORCH_MPS_HIGH_WATERMARK_RATIO", "0.0")
