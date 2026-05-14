@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from loguru import logger
 
 from app.core.db import SessionLocal
@@ -19,7 +21,8 @@ async def retrieve_evidence(state: ChecklistState) -> dict[str, object]:
     case_id = state["case_id"]
 
     async with SessionLocal() as session:
-        hits = await search(item.sub_query, case_id, session, k=8)
+        retrieve_k = int(os.environ.get("RETRIEVE_K", 8))
+        hits = await search(item.sub_query, case_id, session, k=retrieve_k)
 
     # Dedupe by context_text: two windows from the same parent section share identical
     # context_text and would waste context budget if both were sent to the LLM (G7).

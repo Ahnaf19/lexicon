@@ -161,10 +161,11 @@ def rrf_merge(
     dense_rows: list[dict[str, Any]],
     sparse_rows: list[dict[str, Any]],
     k_rrf: int = K_RRF,
+    k: int = TOP_K,
 ) -> list[dict[str, Any]]:
     """Reciprocal Rank Fusion over dense + sparse ranked lists.
 
-    Returns rows sorted by descending RRF score, top-TOP_K.
+    Returns rows sorted by descending RRF score, top-k.
     Tie-break is ascending str(chunk_id) for determinism.
     Each returned dict has the original row fields plus:
       rrf_score, dense_rank (1-based, None if absent), sparse_rank (1-based, None if absent)
@@ -203,7 +204,7 @@ def rrf_merge(
         scored.append(row)
 
     scored.sort(key=lambda r: (-r["rrf_score"], str(r["chunk_id"])))
-    return scored[:TOP_K]
+    return scored[:k]
 
 
 # ---------------------------------------------------------------------------
@@ -295,5 +296,5 @@ async def search(
         sparse_hits=len(sparse_rows),
     ).debug("hybrid_search_branches")
 
-    merged = rrf_merge(dense_rows, sparse_rows)
+    merged = rrf_merge(dense_rows, sparse_rows, k=k)
     return await expand_with_parents(merged, session)
