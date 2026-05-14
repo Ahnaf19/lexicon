@@ -139,4 +139,10 @@ async def validate_item(state: ChecklistState) -> dict[str, object]:
     ).info("validate_item_ok")
 
     in_progress[slug] = checklist_item
-    return {"items_in_progress": in_progress}
+
+    # Snapshot the validated item as the "original_draft" for few-shot bank (phase 5).
+    # pattern_extractor reads this at finalize time to build (original, final) pairs.
+    draft_originals = dict(state.get("draft_originals") or {})
+    draft_originals[slug] = checklist_item.model_copy(deep=True)
+
+    return {"items_in_progress": in_progress, "draft_originals": draft_originals}

@@ -51,8 +51,16 @@ async def assemble(state: ChecklistState) -> dict[str, object]:
     checklist_id = uuid.uuid4()
     generated_at = datetime.now(timezone.utc)
 
+    # Persist draft_originals keyed by str(source_template_item_id) so pattern_extractor can
+    # look them up by item_row.source_template_item_id (UUID string key).
+    draft_originals_raw = state.get("draft_originals") or {}
+    draft_originals_serialized: dict[str, object] = {}
+    for _slug, orig in draft_originals_raw.items():
+        if isinstance(orig, ChecklistItem) and orig.source_template_item_id is not None:
+            draft_originals_serialized[str(orig.source_template_item_id)] = orig.model_dump(mode="json")
+
     async with SessionLocal() as session:
-        # Insert Checklist row.
+        # Insert Checklist row; stash draft_originals in eval_metrics for pattern_extractor.
         checklist_orm = ChecklistORM(
             id=checklist_id,
             case_id=case_id,
@@ -61,6 +69,7 @@ async def assemble(state: ChecklistState) -> dict[str, object]:
             generated_at=generated_at,
             model_version=model_version,
             prompt_version=prompt_version,
+            eval_metrics={"draft_originals": draft_originals_serialized} if draft_originals_serialized else None,
         )
         session.add(checklist_orm)
         await session.flush()  # get the FK before inserting items
@@ -77,7 +86,7 @@ async def assemble(state: ChecklistState) -> dict[str, object]:
                 required=item.required,
                 confidence=item.confidence,
                 rationale=item.rationale,
-                learned_from_pattern_ids=[],
+                learned_from_pattern_ids=list(item.learned_from_pattern_ids),
             )
             session.add(item_orm)
             await session.flush()

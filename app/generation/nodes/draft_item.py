@@ -9,11 +9,14 @@ import httpx
 from loguru import logger
 from pydantic import ValidationError
 
+from app.core.config import settings
+from app.core.db import SessionLocal
 from app.core.llm import get_chat_model
 from app.core.ratelimit import groq_limiter
-from app.core.config import settings
 from app.generation.prompts import load_prompt
 from app.generation.state import ChecklistState, DraftChecklistItem
+from app.learning.few_shot_bank import retrieve_few_shot
+from app.models.pydantic_models import ChecklistItem, LearnedPattern
 from app.retrieval.hybrid_search import SearchHit
 
 _PROMPT_TEMPLATE = load_prompt("draft_item", version="v1")
@@ -62,6 +65,29 @@ async def _call_llm(prompt_text: str, use_strict: bool = False) -> DraftChecklis
     return result
 
 
+def _render_few_shot_pairs(pairs: list[tuple[ChecklistItem, ChecklistItem]]) -> str:
+    """Serialise (original_draft, final_item) pairs for prompt injection."""
+    out = []
+    for original, final in pairs:
+        out.append(
+            {
+                "original_draft": original.model_dump(mode="json"),
+                "final_item": final.model_dump(mode="json"),
+            }
+        )
+    return json.dumps(out, default=str)
+
+
+def _render_draft_patterns(patterns: list[LearnedPattern]) -> str:
+    """Serialise patterns relevant at draft time (style_preference, status_default)."""
+    relevant = [
+        {"pattern_type": p.pattern_type, "rule_json": p.rule_json}
+        for p in patterns
+        if p.pattern_type in ("style_preference", "status_default")
+    ]
+    return json.dumps(relevant, default=str)
+
+
 async def draft_item(state: ChecklistState) -> dict[str, object]:
     """Draft one ChecklistItem via structured LLM call with one retry on validation failure."""
     template = state["template"]
@@ -70,19 +96,40 @@ async def draft_item(state: ChecklistState) -> dict[str, object]:
 
     item = next(i for i in template.items if i.slug == slug)
     hits = (state.get("search_hits_by_item") or {}).get(slug, [])
+    learned_patterns: list[LearnedPattern] = list(state.get("learned_patterns") or [])
 
     evidence_blocks = _build_evidence_blocks(hits)
+    evidence_summary = " ".join(h.snippet for h in hits)[:500]
+
+    # CIPHER: retrieve top-3 few-shot pairs by embedding similarity (L2).
+    few_shot_pairs: list[tuple[ChecklistItem, ChecklistItem]] = []
+    try:
+        async with SessionLocal() as session:
+            few_shot_pairs = await retrieve_few_shot(
+                session=session,
+                template_item=item,
+                doc_type=template.doc_type,
+                evidence_summary=evidence_summary,
+                k=3,
+            )
+    except Exception as exc:
+        logger.bind(item_slug=slug, error=str(exc)[:120]).warning(
+            "draft_item_few_shot_retrieval_failed"
+        )
+
     schema_json = json.dumps(DraftChecklistItem.model_json_schema(), indent=2)
 
-    prompt_text = _PROMPT_TEMPLATE.format(
-        schema=schema_json,
-        item_title=item.title,
-        item_description=item.description,
-        item_category=item.category,
-        item_required=str(item.required),
-        learned_patterns_json="[]",
-        few_shot_pairs_json="[]",
-        evidence_blocks=evidence_blocks,
+    # Use .replace() not .format() — JSON braces in schema break .format() (L7).
+    prompt_text = (
+        _PROMPT_TEMPLATE
+        .replace("{schema}", schema_json)
+        .replace("{item_title}", item.title)
+        .replace("{item_description}", item.description)
+        .replace("{item_category}", item.category)
+        .replace("{item_required}", str(item.required))
+        .replace("{learned_patterns_json}", _render_draft_patterns(learned_patterns))
+        .replace("{few_shot_pairs_json}", _render_few_shot_pairs(few_shot_pairs))
+        .replace("{evidence_blocks}", evidence_blocks)
     )
 
     model_version = (

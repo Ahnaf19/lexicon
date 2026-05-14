@@ -40,6 +40,9 @@ class ChecklistState(TypedDict, total=False):
     prompt_version: str
     current_item_slug: str | None           # cursor for the sequential per-item loop
     item_index: int                         # internal loop counter (not exposed via API)
+    # draft_originals: post-validate_item snapshot used by pattern_extractor at finalize time.
+    # Keyed by template_item.slug, populated by validate_item, read-only after that.
+    draft_originals: dict[str, ChecklistItem]
     # assemble output — must be declared for LangGraph to retain across state merge
     checklist: Checklist | None
     checklist_id: uuid.UUID | None
