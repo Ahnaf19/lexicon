@@ -306,6 +306,134 @@ def checklist_generate(
     asyncio.run(_run())
 
 
+learning_app = typer.Typer(help="Learning loop — edit capture, pattern extraction, pattern list")
+app.add_typer(learning_app, name="learning")
+
+
+@learning_app.command("edits-simulate")
+def learning_edits_simulate(
+    checklist_id: uuid.UUID = typer.Option(..., "--checklist-id", help="Target checklist UUID"),
+    script: Path = typer.Argument(..., help="Path to edit script JSON file"),
+) -> None:
+    """Apply a canned edit script to a checklist via HTTP.
+
+    Each script is a JSON array of {method, path, body} objects.
+    """
+    configure_logging()
+    import httpx as _httpx
+
+    if not script.exists():
+        rprint(f"[red]Script not found: {script}[/red]")
+        raise typer.Exit(1)
+
+    import json as _json
+
+    steps = _json.loads(script.read_text())
+
+    from app.main import app as _fastapi_app
+
+    async def _run() -> None:
+        async with _httpx.AsyncClient(
+            transport=_httpx.ASGITransport(app=_fastapi_app),  # type: ignore[arg-type]
+            base_url="http://testserver",
+        ) as client:
+            for i, step in enumerate(steps, 1):
+                method = step["method"].upper()
+                path = step["path"]
+                body = step.get("body")
+                rprint(f"[dim]  step {i}: {method} {path}[/dim]")
+                resp = await client.request(method, path, json=body)
+                if resp.status_code >= 400:
+                    rprint(f"  [red]ERROR {resp.status_code}:[/red] {resp.text[:200]}")
+                else:
+                    rprint(f"  [green]{resp.status_code}[/green] {resp.text[:200]}")
+
+    asyncio.run(_run())
+
+
+@learning_app.command("finalize")
+def learning_finalize(
+    checklist_id: uuid.UUID = typer.Argument(..., help="Checklist UUID to finalize"),
+) -> None:
+    """Finalize a checklist and wait for pattern extraction to complete."""
+    configure_logging()
+    from app.learning.pattern_extractor import extract_patterns
+
+    async def _run() -> None:
+        rprint(f"[bold]Finalizing checklist {checklist_id}...[/bold]")
+        async with SessionLocal() as session:
+            from datetime import datetime, timezone
+            from sqlalchemy import update as _update
+            from app.models.sqlalchemy_models import Checklist as ChecklistORM
+
+            await session.execute(
+                _update(ChecklistORM)
+                .where(ChecklistORM.id == checklist_id)
+                .values(
+                    finalized_at=datetime.now(timezone.utc),
+                    status="finalized",
+                )
+            )
+            await session.commit()
+
+        rprint("[dim]  running pattern extraction...[/dim]")
+        await extract_patterns(checklist_id)
+        rprint("[green]  done[/green]")
+
+    asyncio.run(_run())
+
+
+@learning_app.command("patterns-list")
+def learning_patterns_list(
+    promoted_only: bool = typer.Option(False, "--promoted-only", help="Show only promoted patterns"),
+    doc_type: Optional[str] = typer.Option(None, "--doc-type", help="Filter by doc_type"),
+) -> None:
+    """Pretty-print learned_patterns table."""
+    configure_logging()
+    from sqlalchemy import select
+
+    from app.models.pydantic_models import LearnedPattern
+    from app.models.sqlalchemy_models import LearnedPattern as LearnedPatternORM
+
+    async def _run() -> None:
+        async with SessionLocal() as session:
+            stmt = select(LearnedPatternORM)
+            if promoted_only:
+                stmt = stmt.where(LearnedPatternORM.promoted.is_(True))
+            if doc_type:
+                stmt = stmt.where(LearnedPatternORM.doc_type_scope == doc_type)
+            stmt = stmt.order_by(LearnedPatternORM.created_at.desc())
+            result = await session.execute(stmt)
+            rows = list(result.scalars().all())
+
+        if not rows:
+            rprint("[yellow]No patterns found.[/yellow]")
+            return
+
+        table = Table(title="Learned Patterns", show_lines=True)
+        table.add_column("Type", style="cyan", max_width=18)
+        table.add_column("Scope", max_width=20)
+        table.add_column("Count", width=5)
+        table.add_column("Conf", width=5)
+        table.add_column("Promoted", width=8)
+        table.add_column("Rule", max_width=50)
+
+        for row in rows:
+            import json as _json
+
+            table.add_row(
+                row.pattern_type,
+                row.doc_type_scope,
+                str(row.corroborating_edit_count),
+                f"{row.confidence:.2f}",
+                "[green]YES[/green]" if row.promoted else "[red]no[/red]",
+                _json.dumps(row.rule_json, default=str)[:100],
+            )
+        console.print(table)
+
+    asyncio.run(_run())
+
+
 def main() -> None:
     app()
 
