@@ -68,7 +68,7 @@ class Chunk(Base):
     char_offset_start: Mapped[int] = mapped_column(Integer, nullable=False)
     char_offset_end: Mapped[int] = mapped_column(Integer, nullable=False)
     text: Mapped[str] = mapped_column(Text, nullable=False)
-    embedding: Mapped[list[float]] = mapped_column(Vector(768), nullable=False)  # type: ignore[type-arg]
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(768), nullable=True)  # type: ignore[type-arg]
     # tsv is a GENERATED column — managed by Alembic DDL, not the ORM
     parent_section_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("chunks.id"))
     meta: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)  # type: ignore[type-arg]

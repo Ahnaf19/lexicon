@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from decimal import Decimal
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -20,7 +19,7 @@ class Party(BaseModel):
 
 
 class MonetaryAmount(BaseModel):
-    amount: Decimal
+    amount: float
     currency: str
     context: str | None = None
 
@@ -43,15 +42,36 @@ class SignatureBlock(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class BBox(BaseModel):
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+
+
+class ChunkProvenance(BaseModel):
+    """Provenance payload stored in chunks.meta — serialised via .model_dump()."""
+
+    bbox: BBox
+    ocr_confidence: float = Field(ge=0.0, le=1.0)
+    ocr_engine: Literal["marker", "trocr"]
+    is_handwriting: bool = False
+    low_ocr_confidence: bool = False
+
+
 class DocumentMeta(BaseModel):
     doc_id: UUID
     doc_type: Literal[
-        "NDA",
+        "nda",
         "employment",
-        "real_estate_closing",
+        "commercial_contract",
+        "license",
+        "service",
+        "distribution",
+        "maintenance",
+        "strategic_alliance",
         "loan_agreement",
-        "discovery_production",
-        "unknown",
+        "other",
     ]
     parties: list[Party]
     effective_date: date | None = None
