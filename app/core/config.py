@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     env: Literal["dev", "prod"] = "dev"
 
+    auto_index: bool = True
+    embedding_dim: int = 768
+
     trocr_printed_threshold: float = 0.4
 
 
