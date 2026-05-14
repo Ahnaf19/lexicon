@@ -324,6 +324,16 @@ class DraftLearnedPattern(BaseModel):
     rationale: str | None = None
 
 
+class DraftPatternBatch(BaseModel):
+    """Batch wrapper so `with_structured_output` receives a concrete Pydantic model.
+
+    LangChain rejects `list[DraftLearnedPattern]` (a generic alias). Wrapping in
+    a single-field model yields a stable JSON shape: `{"patterns": [...]}`.
+    """
+
+    patterns: list[DraftLearnedPattern] = Field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # FewShotExample — in-memory Pydantic counterpart to few_shot_examples ORM row
 # ---------------------------------------------------------------------------

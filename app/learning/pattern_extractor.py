@@ -24,6 +24,7 @@ from app.generation.prompts import load_prompt
 from app.models.pydantic_models import (
     ChecklistItem,
     DraftLearnedPattern,
+    DraftPatternBatch,
 )
 from app.models.sqlalchemy_models import (
     Checklist as ChecklistORM,
@@ -61,32 +62,30 @@ async def _call_extraction_llm(
     existing_patterns_json: str,
 ) -> list[DraftLearnedPattern]:
     """One structured LLM call; retried once with strict suffix on ValidationError (L1)."""
-    schema_json = json.dumps(DraftLearnedPattern.model_json_schema(), indent=2)
+    schema_json = json.dumps(DraftPatternBatch.model_json_schema(), indent=2)
     prompt = (
         _PROMPT_TEMPLATE
         .replace("{schema}", schema_json)
         .replace("{edit_events_json}", edit_events_json)
         .replace("{existing_patterns_json}", existing_patterns_json)
     )
-    model = get_chat_model(role="quality").with_structured_output(
-        list[DraftLearnedPattern]  # type: ignore[arg-type]
-    )
+    model = get_chat_model(role="quality").with_structured_output(DraftPatternBatch)
 
     try:
-        result = await asyncio.wait_for(model.ainvoke(prompt), timeout=_LLM_TIMEOUT)
+        batch = await asyncio.wait_for(model.ainvoke(prompt), timeout=_LLM_TIMEOUT)
     except _RECOVERABLE:
-        # One stricter retry
         strict_prompt = (
             prompt
-            + "\n\nIMPORTANT: Return ONLY a valid JSON array. No prose, no markdown."
+            + '\n\nIMPORTANT: Return ONLY a valid JSON object of the form '
+              '{"patterns": [...]}. No prose, no markdown.'
         )
-        result = await asyncio.wait_for(
+        batch = await asyncio.wait_for(
             model.ainvoke(strict_prompt), timeout=_LLM_TIMEOUT
         )
 
-    if not isinstance(result, list):
-        raise ValueError(f"Unexpected extraction output: {type(result)}")
-    return result  # type: ignore[return-value]
+    if not isinstance(batch, DraftPatternBatch):
+        raise ValueError(f"Unexpected extraction output: {type(batch)}")
+    return batch.patterns
 
 
 async def extract_patterns(checklist_id: uuid.UUID) -> None:
