@@ -1,0 +1,12 @@
+[
+  {
+    "_comment": "Flip confidentiality items from 'present' to 'unclear' when confidence < 0.85.",
+    "_note": "ITEM_ID must be replaced with the actual UUID of the confidentiality item.",
+    "method": "PATCH",
+    "path": "/checklists/{CHECKLIST_ID}/items/{ITEM_ID}",
+    "body": {
+      "status": "unclear",
+      "rationale": "Confidence below 0.85 threshold — operator requires explicit verification."
+    }
+  }
+]
