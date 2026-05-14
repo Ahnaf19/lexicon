@@ -8,6 +8,10 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
 
+# TemplateItem is imported here solely for TemplateAddition.item_template.
+# app.generation.templates.types has no app imports, so no circular dependency.
+from app.generation.templates.types import TemplateItem  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Supporting types for DocumentMeta
 # ---------------------------------------------------------------------------
@@ -176,7 +180,7 @@ class LearnedPattern(BaseModel):
 
 class ItemAdded(BaseModel):
     event_type: Literal["item_added"] = "item_added"
-    item_payload: dict[str, object]
+    item: ChecklistItem
 
 
 class ItemRemoved(BaseModel):
@@ -247,3 +251,127 @@ EditEvent = Annotated[
     | RequiredToggled,
     Field(discriminator="event_type"),
 ]
+
+
+# ---------------------------------------------------------------------------
+# rule_json typed variants (PRD §5f Layer 2) — used by pattern_extractor + critique
+# ---------------------------------------------------------------------------
+
+
+class RenameRule(BaseModel):
+    """Rename any item whose title contains from_text to use to_text instead."""
+
+    from_text: str
+    to_text: str
+    scope_category: str | None = None
+
+
+class TemplateAddition(BaseModel):
+    """Always add this item to the template for the given doc_type."""
+
+    item_template: TemplateItem
+
+
+class TemplateRemoval(BaseModel):
+    """Always remove the item with this slug from the template for the given doc_type."""
+
+    item_slug: str
+
+
+class StatusDefault(BaseModel):
+    """Override the draft status for items matching this slug."""
+
+    item_slug: str
+    default_status: Literal["present", "missing", "unclear"]
+
+
+class StylePreference(BaseModel):
+    """Apply this phrasing guideline to the specified field when drafting items."""
+
+    field: Literal["rationale", "title", "description"]
+    guideline: str
+
+
+class CategoryRemap(BaseModel):
+    """Re-categorise items whose title matches the given regex."""
+
+    matches_title_regex: str
+    target_category: str
+
+
+# ---------------------------------------------------------------------------
+# DraftLearnedPattern — loose LLM output; pattern_extractor validates + promotes
+# ---------------------------------------------------------------------------
+
+
+class DraftLearnedPattern(BaseModel):
+    """Unvalidated pattern returned by the extraction LLM.
+
+    The extractor rejects any instance with empty supporting_edit_ids (P1 invariant).
+    """
+
+    pattern_type: Literal[
+        "rename_rule",
+        "template_addition",
+        "template_removal",
+        "status_default",
+        "style_preference",
+        "category_remap",
+    ]
+    doc_type_scope: str
+    rule_json: dict[str, object]
+    supporting_edit_ids: list[UUID]
+    rationale: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# FewShotExample — in-memory Pydantic counterpart to few_shot_examples ORM row
+# ---------------------------------------------------------------------------
+
+
+class FewShotExample(BaseModel):
+    id: UUID
+    doc_type: str
+    category: str
+    template_item_id: UUID | None = None
+    original_draft: ChecklistItem
+    final_item: ChecklistItem
+    created_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# PartialChecklistItem — PATCH body for item mutations (all fields optional)
+# ---------------------------------------------------------------------------
+
+
+class PartialChecklistItem(BaseModel):
+    category: (
+        Literal[
+            "Parties",
+            "Financial Terms",
+            "Required Exhibits",
+            "Signatures",
+            "Deadlines",
+            "Consents",
+            "Disclosures",
+            "Other",
+        ]
+        | None
+    ) = None
+    title: str | None = None
+    description: str | None = None
+    status: Literal["present", "missing", "unclear"] | None = None
+    required: bool | None = None
+    confidence: float | None = None
+    rationale: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# EvidenceMutation — PATCH body for evidence mutations
+# ---------------------------------------------------------------------------
+
+
+class EvidenceMutation(BaseModel):
+    action: Literal["add", "correct", "remove"]
+    evidence: EvidenceCitation | None = None
+    old_citation_id: UUID | None = None
