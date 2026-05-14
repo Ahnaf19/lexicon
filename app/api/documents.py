@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.db import get_session
 from app.ingestion.orchestrator import ingest_document
 from app.models.sqlalchemy_models import Chunk, Document, Page
@@ -60,8 +61,22 @@ async def upload_document(
     filename = file.filename or "upload"
     doc_id = uuid.uuid4()
 
+    async def _ingest_then_index(
+        file_bytes: bytes,
+        filename: str,
+        mime: str,
+        case_id: uuid.UUID,
+    ) -> None:
+        doc_id = await ingest_document(
+            file_bytes=file_bytes, filename=filename, mime=mime, case_id=case_id
+        )
+        if settings.auto_index:
+            from app.retrieval.indexing import index_document  # lazy import avoids circular dep
+
+            await index_document(doc_id)
+
     background_tasks.add_task(
-        ingest_document,
+        _ingest_then_index,
         file_bytes=file_bytes,
         filename=filename,
         mime=mime,

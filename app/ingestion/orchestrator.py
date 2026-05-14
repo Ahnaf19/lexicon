@@ -206,7 +206,7 @@ async def ingest_document(
             # ---------------------------------------------------------------
             any_trocr = any(b.ocr_engine == "trocr" for b in blocks)
             total_pages = max(pages_by_num.keys(), default=0)
-            final_status = "indexed" if extract_status == "ok" else "extraction_unclear"
+            final_status = "ocr_done" if extract_status == "ok" else "extraction_unclear"
             doc_meta = meta.model_dump(mode="json")
             if original_mime != mime:
                 doc_meta["original_mime"] = original_mime

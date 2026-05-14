@@ -1,23 +1,23 @@
-"""CLI entry point for Lexicon ingestion.
+"""CLI entry point for Lexicon ingestion, indexing, and search.
 
 Usage:
     uv run python -m app.cli ingest <path> [--case-id <uuid>]
-
-<path> can be a single file (.pdf, .jpg, .jpeg, .png) or a directory
-(ingests all matching files sequentially).
+    uv run python -m app.cli reindex [doc_id | --case-id X | --all]
+    uv run python -m app.cli search "<query>" --case-id X [--k 5]
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import mimetypes
 import uuid
 from pathlib import Path
+from typing import Optional
 
 import typer
 from rich import print as rprint
 from rich.console import Console
+from rich.table import Table
 
 from app.core.db import SessionLocal
 from app.core.logging import configure_logging
@@ -115,6 +115,111 @@ def ingest(
             await _ingest_and_print(file, case_id)
 
     asyncio.run(_run_all())
+
+
+@app.command()
+def reindex(
+    doc_id: Optional[uuid.UUID] = typer.Argument(None, help="Single document UUID to reindex"),
+    case_id: Optional[uuid.UUID] = typer.Option(None, "--case-id", help="Reindex all docs in case"),
+    all_docs: bool = typer.Option(False, "--all", help="Reindex every document in the DB"),
+) -> None:
+    """Rechunk and re-embed documents, making them retrieval-ready."""
+    configure_logging()
+    from sqlalchemy import select
+
+    from app.retrieval.indexing import index_document
+
+    async def _run() -> None:
+        async with SessionLocal() as session:
+            stmt = select(Document.id, Document.original_filename)
+            if doc_id is not None:
+                stmt = stmt.where(Document.id == doc_id)
+            elif case_id is not None:
+                stmt = stmt.where(Document.case_id == case_id)
+            elif all_docs:
+                pass  # no filter — all docs
+            else:
+                rprint("[red]Specify a doc_id, --case-id, or --all[/red]")
+                raise typer.Exit(1)
+
+            result = await session.execute(stmt)
+            targets = result.all()
+
+        if not targets:
+            rprint("[yellow]No matching documents found.[/yellow]")
+            return
+
+        rprint(f"[bold]Reindexing {len(targets)} document(s)...[/bold]")
+        sem = asyncio.Semaphore(2)
+
+        async def _index_one(did: uuid.UUID, fname: str) -> None:
+            async with sem:
+                rprint(f"  [cyan]{fname}[/cyan] ({did}) ...")
+                try:
+                    await index_document(did)
+                    rprint(f"  [green]OK[/green] {fname}")
+                except Exception as exc:
+                    rprint(f"  [red]FAIL[/red] {fname}: {exc}")
+
+        await asyncio.gather(*[_index_one(did, fname) for did, fname in targets])
+
+    asyncio.run(_run())
+
+
+@app.command()
+def search(
+    query: str = typer.Argument(..., help="Search query string"),
+    case_id: uuid.UUID = typer.Option(..., "--case-id", help="Case UUID to search within"),
+    k: int = typer.Option(5, "--k", help="Number of results to return"),
+) -> None:
+    """Hybrid dense + sparse search over indexed documents."""
+    configure_logging()
+    from sqlalchemy import select
+
+    from app.retrieval.hybrid_search import search as _search
+
+    async def _run() -> None:
+        async with SessionLocal() as session:
+            hits = await _search(query, case_id, session, k=k)
+
+        if not hits:
+            rprint("[yellow]No results found.[/yellow]")
+            return
+
+        # Fetch short filenames for display
+        async with SessionLocal() as session:
+            doc_ids = list({h.doc_id for h in hits})
+            name_result = await session.execute(
+                select(Document.id, Document.original_filename).where(
+                    Document.id.in_(doc_ids)
+                )
+            )
+            name_map = {row[0]: row[1] for row in name_result}
+
+        table = Table(title=f'Search: "{query}"', show_lines=True)
+        table.add_column("Rank", style="bold", width=4)
+        table.add_column("Doc", style="cyan", max_width=30)
+        table.add_column("Page", width=4)
+        table.add_column("Dense", width=5)
+        table.add_column("Sparse", width=6)
+        table.add_column("RRF", width=7)
+        table.add_column("Snippet", max_width=60)
+
+        for rank, hit in enumerate(hits, 1):
+            fname = name_map.get(hit.doc_id, str(hit.doc_id))[:28]
+            table.add_row(
+                str(rank),
+                fname,
+                str(hit.page_number),
+                str(hit.dense_rank) if hit.dense_rank is not None else "—",
+                str(hit.sparse_rank) if hit.sparse_rank is not None else "—",
+                f"{hit.retrieval_score:.4f}",
+                hit.snippet[:100],
+            )
+
+        console.print(table)
+
+    asyncio.run(_run())
 
 
 def main() -> None:
