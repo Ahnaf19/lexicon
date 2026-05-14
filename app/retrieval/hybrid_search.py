@@ -285,12 +285,9 @@ async def search(
     Returns list[SearchHit]; call .to_evidence_citation() for each hit as needed
     by the generation layer (PRD §5d).
     """
-    import asyncio
-
-    dense_rows, sparse_rows = await asyncio.gather(
-        dense(query, case_id, session, k=K_PER_BRANCH),
-        sparse(query, case_id, session, k=K_PER_BRANCH),
-    )
+    # Sequential: AsyncSession doesn't allow concurrent operations on the same connection.
+    dense_rows = await dense(query, case_id, session, k=K_PER_BRANCH)
+    sparse_rows = await sparse(query, case_id, session, k=K_PER_BRANCH)
     logger.bind(
         query=query[:80],
         case_id=str(case_id),

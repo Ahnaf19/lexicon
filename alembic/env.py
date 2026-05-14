@@ -15,7 +15,11 @@ if config.config_file_name is not None:
 from app.core.config import settings  # noqa: E402
 from app.models.sqlalchemy_models import Base  # noqa: E402
 
-config.set_main_option("sqlalchemy.url", str(settings.db_url))
+# Only set the URL from settings if the caller hasn't already overridden it
+# (e.g., test fixtures pass lexicon_test via cfg.set_main_option before command.upgrade).
+_configured_url = config.get_main_option("sqlalchemy.url") or ""
+if not _configured_url or "driver://" in _configured_url:
+    config.set_main_option("sqlalchemy.url", str(settings.db_url))
 target_metadata = Base.metadata
 
 
