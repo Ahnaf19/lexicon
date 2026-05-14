@@ -1,9 +1,8 @@
 [
   {
-    "_comment": "Find items with 'Counterparty' in title and rename to 'Borrower'.",
-    "_note": "The path uses a placeholder ITEM_ID — replace with a real item UUID when running.",
-    "method": "PATCH",
-    "path": "/checklists/{CHECKLIST_ID}/items/{ITEM_ID}",
+    "_comment": "Rename the 'Parties identified' item to use 'Borrower' terminology.",
+    "op": "patch",
+    "target_template_item_slug": "parties",
     "body": {
       "title": "Borrower identified and verified"
     }

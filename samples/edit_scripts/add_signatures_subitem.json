@@ -1,10 +1,9 @@
 [
   {
     "_comment": "Add a 'Signatures dated and notarized' item to the checklist.",
-    "method": "POST",
-    "path": "/checklists/{CHECKLIST_ID}/items",
+    "op": "add",
+    "target_template_item_slug": null,
     "body": {
-      "id": "00000000-0000-0000-0000-000000000001",
       "category": "Signatures",
       "title": "Signatures dated and notarized",
       "description": "Verify that all signature blocks include a date and notarization stamp.",
