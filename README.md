@@ -2,7 +2,7 @@
 
 Lexicon ingests messy legal documents — scanned contracts, degraded PDFs, handwritten exhibits — and produces structured Document Checklists where every claim cites a specific span in the source material.
 
-Unlike naive RAG pipelines that generate plausible-sounding answers, Lexicon enforces grounding: a V1–V5 validation gate rejects hallucinated page references and coerces ambiguous evidence to `unclear` rather than guessing. Parent-section expansion ensures that citations still point at precise text windows while generation sees the full surrounding context.
+Unlike naive RAG pipelines that generate plausible-sounding answers, Lexicon enforces grounding: a V1–V5 validation gate rejects hallucinated page references and coerces ambiguous evidence to `unclear` rather than guessing. Parent-section expansion ensures citations still point at precise text windows while generation sees the full surrounding context.
 
 The improvement loop is operational — operator edits become typed database rows, distilled into promoted `LearnedPattern` rules, and applied automatically on the next run.
 
@@ -10,13 +10,61 @@ The improvement loop is operational — operator edits become typed database row
 
 ## Quickstart
 
+### Prerequisites
+
+| Tool | Install |
+|---|---|
+| Docker Desktop | [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop/) |
+| uv (Python package manager) | `curl -LsSf https://astral.sh/uv/install.sh \| sh` (Mac/Linux) or `powershell -c "irm https://astral.sh/uv/install.ps1 \| iex"` (Windows) |
+| Groq API key (free) | [console.groq.com](https://console.groq.com) — create an account, copy your key |
+
+### 1. Clone and configure
+
 ```bash
-docker compose up -d postgres ollama
+git clone <repo-url>
+cd legal_ai
+
+cp .env.template .env
+# Open .env and set GROQ_API_KEY=<your-key>
+```
+
+### 2. Start Postgres and sync Python deps
+
+```bash
+docker compose up -d postgres
+uv sync
+```
+
+### 3. Run migrations and ingest sample documents
+
+```bash
 uv run alembic upgrade head
 uv run python -m app.cli ingest samples/clean samples/degraded samples/handwritten
 ```
 
-Generate a checklist against the demo case:
+### 4. Start the API
+
+```bash
+uv run uvicorn app.main:app --reload
+# API is live at http://localhost:8000
+# OpenAPI docs at http://localhost:8000/docs
+```
+
+### 5. Open the UI
+
+```bash
+uv run streamlit run ui/streamlit_app.py
+# UI opens at http://localhost:8501
+```
+
+Or use `make`:
+
+```bash
+make api   # starts uvicorn with --reload
+make ui    # starts Streamlit
+```
+
+### Generate a checklist via CLI
 
 ```bash
 uv run python -m app.cli checklist generate \
@@ -24,9 +72,89 @@ uv run python -m app.cli checklist generate \
   --template commercial_contract
 ```
 
-**LLM provider:** set `LLM_PROVIDER=groq` and `GROQ_API_KEY` in `.env` for fast cloud generation (~60–110 s per checklist depending on template size), or `LLM_PROVIDER=ollama` for fully local operation (requires `ollama pull qwen3:8b nomic-embed-text` first).
+---
 
-**macOS note:** for long-running local jobs, prefix with `caffeinate -i` to prevent App Nap from throttling Ollama mid-run.
+## Windows quickstart (WSL2 + Docker Desktop)
+
+Docker Desktop on Windows uses WSL2 as its backend — all commands run the same as on Mac/Linux once Docker is running.
+
+1. Install [Docker Desktop for Windows](https://docs.docker.com/desktop/install/windows-install/) with the WSL2 backend enabled.
+2. Install uv in PowerShell: `powershell -c "irm https://astral.sh/uv/install.ps1 | iex"`
+3. Open a WSL2 terminal (or use the Docker Desktop terminal) and follow the Quickstart steps above verbatim.
+
+### NVIDIA GPU support (RTX 3060 Ti and other CUDA cards)
+
+Ollama (used for local embeddings and the Ollama LLM fallback) can use your GPU for faster inference.
+
+**Setup:**
+
+1. Install [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) on your WSL2 host:
+   ```bash
+   # In WSL2 Ubuntu:
+   curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+   curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+     sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+     sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+   sudo apt-get update && sudo apt-get install -y nvidia-container-toolkit
+   sudo nvidia-ctk runtime configure --runtime=docker
+   sudo systemctl restart docker
+   ```
+2. Verify: `docker run --gpus all nvidia/cuda:12.0-base nvidia-smi` — should print your GPU name.
+
+3. Start Ollama with GPU access:
+   ```bash
+   docker compose --profile local-llm up -d ollama
+   ```
+   The `deploy.resources.reservations.devices` block in `docker-compose.yml` is already wired — no further changes needed.
+
+4. Pull the embedding model:
+   ```bash
+   docker compose exec ollama ollama pull nomic-embed-text
+   # For local LLM fallback:
+   docker compose exec ollama ollama pull qwen3:8b
+   ```
+
+5. Set `LLM_PROVIDER=ollama` in `.env` to switch from Groq to the local GPU.
+
+**Verifying GPU is in use:**
+
+Ollama logs GPU memory allocation when a model is loaded:
+```
+# docker compose logs -f ollama
+time=... msg="loading model" gpu=0 name=NVIDIA GeForce RTX 3060 Ti vram=7.67GiB
+time=... msg="llama runner started" layers_on_gpu=33
+```
+
+You can also run `nvidia-smi` in WSL2 while a generation is in progress — look for the `ollama` process in the GPU Process column.
+
+**Performance: RTX 3060 Ti vs Apple M3 Pro**
+
+| Task | M3 Pro (18 GB unified) | RTX 3060 Ti (8 GB VRAM) |
+|---|---|---|
+| `nomic-embed-text` inference | ~180 tokens/s | ~400–600 tokens/s |
+| `qwen3:8b` generation | ~30–40 tokens/s | ~55–80 tokens/s |
+| Marker OCR (clean PDF, 10 pages) | ~8–12 s | ~2–4 s (GPU path) |
+
+The RTX 3060 Ti's dedicated VRAM gives it a clear edge on transformer inference — expect roughly 2× faster embedding throughput and 1.5–2× faster local LLM generation compared to the M3 Pro's shared-memory GPU. The M3 Pro's advantage is zero model-load overhead (no PCIe transfer) and higher sustained CPU bandwidth for preprocessing.
+
+> **Note:** Groq (`LLM_PROVIDER=groq`) runs on Groq's custom LPU hardware at ~400 tokens/s regardless of local GPU. For generation, Groq is faster than both options above. GPU acceleration primarily benefits local embeddings (Ollama `nomic-embed-text`) and local fallback LLM (`qwen3:8b`).
+
+---
+
+## Running with full Docker stack
+
+Bring up every service with one command:
+
+```bash
+docker compose up -d                          # postgres + api + streamlit
+docker compose --profile local-llm up -d     # + ollama (for local embeddings/LLM)
+docker compose --profile obs up -d           # + Langfuse tracing UI (port 3000)
+```
+
+Then run migrations once:
+```bash
+docker compose exec api uv run alembic upgrade head
+```
 
 ---
 
@@ -72,7 +200,7 @@ uv run python -m app.cli checklist generate \
 
 ## Example output
 
-A single generated checklist item, showing the grounding in full (UUIDs omitted for readability):
+A single generated checklist item, showing full grounding (UUIDs omitted):
 
 ```json
 {
@@ -101,6 +229,28 @@ A single generated checklist item, showing the grounding in full (UUIDs omitted 
 ```
 
 The validator enforces that `evidence` is non-empty whenever `status` is `"present"` — the constraint is in the Pydantic model, not downstream logic.
+
+---
+
+## API reference
+
+The OpenAPI spec is at `http://localhost:8000/docs` when the server is running. Key endpoints:
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/healthz` | DB reachability check |
+| `POST` | `/documents/upload` | Ingest a PDF/image into a case |
+| `GET` | `/documents/{id}/status` | Ingestion status polling |
+| `GET` | `/documents/cases` | List cases with document counts |
+| `GET` | `/documents/cases/{id}/documents` | Documents in a case |
+| `POST` | `/checklists/generate` | SSE stream: generate a checklist |
+| `GET` | `/checklists/{id}` | Retrieve a checklist with all items |
+| `PATCH` | `/checklists/{id}/items/{item_id}` | Edit an item (title/status/rationale) |
+| `POST` | `/checklists/{id}/items` | Add an item |
+| `DELETE` | `/checklists/{id}/items/{item_id}` | Remove an item |
+| `POST` | `/checklists/{id}/finalize` | Trigger pattern extraction |
+| `GET` | `/checklists/learned-patterns` | List learned patterns |
+| `GET` | `/evidence/{citation_id}` | Retrieve a citation + snippet |
 
 ---
 
@@ -137,7 +287,7 @@ Integration tests run against a real Postgres instance with SAVEPOINT-per-test i
 | 3 | 1 | 1.58 | 91.7% | 0.0% | 1 |
 | 4 | 0 | 0.0 | 100.0% | 8.3% | 1 |
 
-Run 3's finalize step is what promotes the first rule (corroboration crosses 3), but Run 3's generation had already completed before promotion — so pattern_application_rate stays 0% for Run 3. Run 4 starts with the promoted pattern active: `critique` applies it at draft time, no operator edit is needed, and mean_edit_distance drops from 1.58 to 0.00. The loop closed automatically. Raw JSON in `eval/results_loop.md`.
+Run 3's finalize step promotes the first rule (corroboration crosses 3), but Run 3's generation had already completed before promotion — so pattern_application_rate stays 0% for Run 3. Run 4 starts with the promoted pattern active: `critique` applies it at draft time, no operator edit is needed, and mean_edit_distance drops from 1.58 to 0.00. The loop closed automatically. Raw JSON in `eval/results_loop.md`.
 
 ---
 
@@ -147,13 +297,13 @@ Run 3's finalize step is what promotes the first rule (corroboration crosses 3),
 
 - **Parent expansion solves the chunking-vs-grounding tension.** Retrieval ranks at the 512-token window level for precision; generation receives the full parent section (up to 3,500 tokens) for context fidelity. Citations still anchor to the precise span — you get signal from dense retrieval and context from the surrounding clause without giving up either.
 
-- **The improvement loop is real, not a diff viewer.** Operator edits (PATCH, DELETE, status corrections) land as typed `EditEvent` rows. A single background LLM call per finalized checklist distills corroborating edits into `LearnedPattern` rules across six pattern types: `rename_rule`, `template_addition`, `template_removal`, `status_default`, `style_preference`, `category_remap`. Promotion is gated on ≥3 corroborating edits and confidence ≥0.7. Promoted rules apply automatically via `load_template` and `critique` on the next run. Mechanically: operator edits are mined into rules that promote at a corroboration threshold, then re-enter the generation prompt as exemplars and template mutations on the next run.
+- **The improvement loop is real, not a diff viewer.** Operator edits (PATCH, DELETE, status corrections) land as typed `EditEvent` rows. A single background LLM call per finalized checklist distills corroborating edits into `LearnedPattern` rules across six pattern types: `rename_rule`, `template_addition`, `template_removal`, `status_default`, `style_preference`, `category_remap`. Promotion is gated on ≥3 corroborating edits and confidence ≥0.7. Promoted rules apply automatically via `load_template` and `critique` on the next run.
 
 - **OCR triage handles both clean and messy inputs.** Marker (Surya) processes printed contracts at roughly 95% confidence. Blocks below 0.6 confidence fall back to `microsoft/trocr-large-handwritten`. The handwritten exhibit's phrase "code for the platform" came through as "code for the patforn" — yet the dense embedding retrieved the document at rank #2 on the query `customer lists pricing models`, because semantic similarity survives OCR noise that exact-match would not.
 
 - **Provider abstraction without vendor lock-in.** The same `init_chat_model` interface switches between Groq `llama-3.3-70b-versatile` and Ollama `qwen3:8b` via a single `LLM_PROVIDER` environment variable. Groq completes a 10–12 item checklist in roughly 60–110 seconds on the free tier; Ollama runs locally for users who don't want to supply API keys.
 
-- **Quality signals are embedded, not bolted on.** Tests run against a real Postgres instance via a SAVEPOINT-per-test fixture — no mocked DB calls. Pydantic schemas split into `Draft` (permissive, for LLM output) and strict (for the API boundary), catching schema drift early. Exception handling uses a narrow `_RECOVERABLE` tuple rather than bare `except Exception`. A multi-engineer agent review cycle (data, ML, QA) runs at every phase boundary and has caught real bugs at every phase boundary.
+- **Quality signals are embedded, not bolted on.** Tests run against a real Postgres instance via a SAVEPOINT-per-test fixture — no mocked DB calls. Pydantic schemas split into `Draft` (permissive, for LLM output) and strict (for the API boundary), catching schema drift early. A multi-engineer agent review cycle (data, ML, QA) runs at every phase boundary.
 
 ---
 

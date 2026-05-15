@@ -23,6 +23,16 @@ services:
       - "11434:11434"
     volumes:
       - ollama:/root/.ollama
+    # NVIDIA GPU support — requires nvidia-container-toolkit on the host.
+    # On Windows: install WSL2 + Docker Desktop + NVIDIA Container Toolkit.
+    # Remove the deploy block entirely to run CPU-only.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 
   langfuse-db:
     image: postgres:16-alpine
@@ -55,7 +65,7 @@ services:
 
   api:
     build: .
-    command: uvicorn app.api.main:app --host 0.0.0.0 --port 8000
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     depends_on:
       postgres:
         condition: service_healthy

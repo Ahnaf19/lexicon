@@ -25,4 +25,4 @@ ui:
 	uv run streamlit run ui/streamlit_app.py
 
 api:
-	uv run uvicorn app.api.main:app --reload
+	uv run uvicorn app.main:app --reload
