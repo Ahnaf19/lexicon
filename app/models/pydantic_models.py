@@ -412,3 +412,37 @@ class EvidenceMutation(BaseModel):
     action: Literal["add", "correct", "remove"]
     evidence: EvidenceCitation | None = None
     old_citation_id: UUID | None = None
+
+
+# ---------------------------------------------------------------------------
+# UI summary models — lightweight read-only views for the Streamlit UI (PRD §9)
+# ---------------------------------------------------------------------------
+
+
+class CaseSummary(BaseModel):
+    """Distinct case_id with its document count."""
+
+    case_id: UUID
+    doc_count: int
+
+
+class DocumentSummary(BaseModel):
+    """Minimal document info for the case overview card."""
+
+    document_id: UUID
+    original_filename: str
+    status: str
+    doc_type: str | None
+    total_pages: int | None
+
+
+class ChecklistSummary(BaseModel):
+    """Minimal checklist info for the case overview card."""
+
+    checklist_id: UUID
+    case_id: UUID
+    generated_at: datetime | None
+    model_version: str
+    prompt_version: str
+    item_count: int
+    status: str

@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.db import get_session
 from app.ingestion.orchestrator import create_pending_document, ingest_document
+from app.models.pydantic_models import CaseSummary, DocumentSummary
 from app.models.sqlalchemy_models import Chunk, Document, Page
 
 router = APIRouter()
@@ -41,6 +42,45 @@ class DocumentDetailResponse(BaseModel):
     page_count: int
     chunk_count: int
     meta: dict[str, Any]
+
+
+@router.get("/cases", response_model=list[CaseSummary])
+async def list_cases(
+    session: AsyncSession = Depends(get_session),
+) -> list[CaseSummary]:
+    """List distinct case_ids with their document counts. UI helper (PRD §9)."""
+    stmt = (
+        select(Document.case_id, func.count(Document.id).label("doc_count"))
+        .where(Document.case_id.isnot(None))
+        .group_by(Document.case_id)
+        .order_by(func.count(Document.id).desc())
+    )
+    rows = (await session.execute(stmt)).all()
+    return [CaseSummary(case_id=r.case_id, doc_count=r.doc_count) for r in rows]
+
+
+@router.get("/cases/{case_id}/documents", response_model=list[DocumentSummary])
+async def list_case_documents(
+    case_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+) -> list[DocumentSummary]:
+    """List documents belonging to a case, ordered newest first. UI helper (PRD §9)."""
+    stmt = (
+        select(Document)
+        .where(Document.case_id == case_id)
+        .order_by(Document.uploaded_at.desc())
+    )
+    docs = (await session.execute(stmt)).scalars().all()
+    return [
+        DocumentSummary(
+            document_id=doc.id,
+            original_filename=doc.original_filename,
+            status=doc.status,
+            doc_type=doc.doc_type,
+            total_pages=doc.total_pages,
+        )
+        for doc in docs
+    ]
 
 
 @router.post("/upload", response_model=UploadResponse, status_code=202)

@@ -27,6 +27,7 @@ from app.learning.pattern_extractor import extract_patterns
 from app.models.pydantic_models import (
     Checklist,
     ChecklistItem,
+    ChecklistSummary,
     EvidenceCitation,
     EvidenceMutation,
     LearnedPattern,
@@ -217,6 +218,38 @@ async def dismiss_learned_pattern_route(
         promoted=row.promoted or False,
         created_at=row.created_at,
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /cases/{case_id}/checklists — list checklists for a case (static before parameterized)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/cases/{case_id}/checklists", response_model=list[ChecklistSummary])
+async def list_case_checklists(
+    case_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+) -> list[ChecklistSummary]:
+    """List checklists generated for a case, newest first. UI helper (PRD §9)."""
+    stmt = (
+        select(ChecklistORM)
+        .where(ChecklistORM.case_id == case_id)
+        .options(selectinload(ChecklistORM.items))
+        .order_by(ChecklistORM.generated_at.desc())
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    return [
+        ChecklistSummary(
+            checklist_id=row.id,
+            case_id=row.case_id,
+            generated_at=row.generated_at,
+            model_version=row.model_version or "unknown",
+            prompt_version=row.prompt_version or "v1",
+            item_count=len(row.items or []),
+            status=row.status,
+        )
+        for row in rows
+    ]
 
 
 # ---------------------------------------------------------------------------
